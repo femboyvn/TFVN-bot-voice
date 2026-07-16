@@ -94,7 +94,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
         self.player._send.assert_awaited_once()
         sent = self.player._send.await_args.args[0]
-        self.assertIn("Now playing", sent)
+        self.assertIn("Đang phát", sent)
         self.assertIn("Cool Song", sent)
 
         voice_client.play.assert_called_once()
@@ -202,7 +202,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         sent_messages = " ".join(
             call.args[0] for call in channel.send.await_args_list if call.args
         )
-        self.assertIn("Now playing", sent_messages)
+        self.assertIn("Đang phát", sent_messages)
         self.assertIn("First", sent_messages)
         media.create_audio_source.assert_called()
         idle.assert_awaited()

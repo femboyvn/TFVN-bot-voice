@@ -34,9 +34,9 @@ class TTSError(RuntimeError):
 
 
 def now_playing_speech(title: str) -> str:
-    """Plain-speech phrase used for now-playing voice announcements."""
-    cleaned = (title or "").strip() or "Untitled"
-    return f"Now playing {cleaned}"
+    """Plain-speech phrase for now-playing announcements (Vietnamese UI)."""
+    cleaned = (title or "").strip() or "Không có tiêu đề"
+    return f"Đang phát {cleaned}"
 
 
 def _gtts_synthesize(text: str, dest: Path, *, lang: str) -> None:

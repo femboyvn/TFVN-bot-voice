@@ -41,7 +41,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.stop.assert_not_called()
         self.ctx.voice_client.disconnect.assert_not_called()
         sent = self.ctx.send.await_args.args[0]
-        self.assertIn("Stopped music", sent)
+        self.assertIn("Đã dừng nhạc", sent)
         self.assertIn("leave", sent)
 
     async def test_stop_without_session_disconnects(self) -> None:
@@ -53,7 +53,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.players.remove.assert_awaited_once_with(1, disconnect=True)
         self.ctx.voice_client.disconnect.assert_awaited()
         sent = self.ctx.send.await_args.args[0]
-        self.assertIn("left", sent.lower())
+        self.assertIn("rời", sent.lower())
 
     async def test_leave_ends_session_and_disconnects(self) -> None:
         self.players.remove = AsyncMock(return_value=True)
@@ -65,7 +65,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.stop.assert_awaited_once_with(1)
         self.ctx.voice_client.disconnect.assert_awaited()
         sent = self.ctx.send.await_args.args[0]
-        self.assertIn("stopped monitoring", sent.lower())
+        self.assertIn("theo dõi", sent.lower())
 
 
 if __name__ == "__main__":

@@ -62,17 +62,17 @@ class MediaService:
         try:
             data = await asyncio.to_thread(self._extract, query)
         except yt_dlp.utils.DownloadError as exc:
-            raise MediaExtractionError("Could not load that media") from exc
+            raise MediaExtractionError("Không thể tải media đó") from exc
 
         if data.get("entries"):
             data = data["entries"][0]
 
         stream_url = data.get("url")
         if not stream_url:
-            raise MediaExtractionError("The media source did not provide an audio stream")
+            raise MediaExtractionError("Nguồn media không cung cấp luồng âm thanh")
 
         return Track(
-            title=data.get("title") or "Untitled",
+            title=data.get("title") or "Không có tiêu đề",
             stream_url=stream_url,
             webpage_url=data.get("webpage_url") or data.get("original_url"),
             duration=_duration_as_int(data.get("duration")),
@@ -82,7 +82,7 @@ class MediaService:
         try:
             data = await asyncio.to_thread(self._search, query, limit)
         except yt_dlp.utils.DownloadError as exc:
-            raise MediaExtractionError("YouTube search failed") from exc
+            raise MediaExtractionError("Tìm kiếm YouTube thất bại") from exc
 
         results: list[SearchResult] = []
         for entry in (data.get("entries") or [])[:limit]:
@@ -93,7 +93,7 @@ class MediaService:
                 url = f"https://www.youtube.com/watch?v={entry['id']}"
             results.append(
                 SearchResult(
-                    title=entry.get("title") or "Untitled",
+                    title=entry.get("title") or "Không có tiêu đề",
                     url=url,
                     duration=_duration_as_int(entry.get("duration")),
                 )

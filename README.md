@@ -5,6 +5,9 @@ YouTube search, per-server queues, pause/resume, skip, current-track looping, TT
 "now playing" announcements, and **voice-chat sessions** that join a VC and read that
 channel's text chat aloud (via gTTS).
 
+User-facing Discord replies and spoken TTS phrases are in **Vietnamese** (customer UI).
+Source comments, logs, and this README stay in English.
+
 ## Requirements
 
 - Python 3.12+
@@ -22,6 +25,8 @@ python -m src
 ```
 
 Set `DISCORD_TOKEN` in `.env` before starting the bot. Never commit that file.
+
+Default TTS language is Vietnamese (`TTS_LANG=vi`). Override with `TTS_LANG=en` if needed.
 
 ## Commands
 
@@ -44,8 +49,8 @@ The default prefix is `!tfd `, including the trailing space.
 
 1. Join a voice channel yourself.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
-3. Type in that **voice channel's text chat** — the bot speaks  
-   `"{display name} says {message}"` into the call.
+3. Type in that **voice channel's text chat** — the bot speaks a Vietnamese line like  
+   `"{display name} nói {message}"`.
 4. Bot commands (`!tfd …`) are not read aloud.
 5. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
 6. `!tfd leave` ends monitoring and disconnects.
@@ -71,12 +76,12 @@ src/
   ducking.py      # mix TTS over music with volume ducking
   tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
-  cogs/music.py   # user-facing commands
+  cogs/music.py   # user-facing commands (Vietnamese replies)
 tests/            # fast unit and construction tests
 ```
 
-When a track starts, the bot still posts **Now playing** in the text channel and also
-speaks that announcement in the connected voice channel. TTS failures fall back to
+When a track starts, the bot posts a Vietnamese **Đang phát** line in the text channel and
+also speaks that announcement in the connected voice channel. TTS failures fall back to
 text-only and do not stall the music queue. Disable with `TTS_ENABLED=false`.
 
 `main.py` remains as a compatibility entry point, so `python main.py` also works.

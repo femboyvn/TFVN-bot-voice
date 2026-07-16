@@ -59,8 +59,9 @@ def prepare_chat_speech(
         return None
     if len(cleaned) > max_chars:
         cleaned = cleaned[: max_chars - 1].rstrip() + "…"
-    name = (author_name or "Someone").strip() or "Someone"
-    return f"{name} says {cleaned}"
+    # Vietnamese customer-facing speech template.
+    name = (author_name or "Ai đó").strip() or "Ai đó"
+    return f"{name} nói {cleaned}"
 
 
 class VoiceSession:

@@ -32,10 +32,10 @@ def _write_fake_mp3(text: str, dest: Path) -> None:
 
 class NowPlayingSpeechTests(unittest.TestCase):
     def test_builds_plain_phrase(self) -> None:
-        self.assertEqual(now_playing_speech("Song Title"), "Now playing Song Title")
+        self.assertEqual(now_playing_speech("Song Title"), "Đang phát Song Title")
 
     def test_falls_back_for_blank_title(self) -> None:
-        self.assertEqual(now_playing_speech("   "), "Now playing Untitled")
+        self.assertEqual(now_playing_speech("   "), "Đang phát Không có tiêu đề")
 
 
 class TextToSpeechTests(unittest.TestCase):

@@ -20,7 +20,7 @@ async def get_or_connect_voice_client(
 ) -> discord.VoiceClient | None:
     voice_state = getattr(ctx.author, "voice", None)
     if not voice_state or not voice_state.channel:
-        await ctx.send("Join a voice channel first.")
+        await ctx.send("Hãy vào một kênh thoại trước.")
         return None
 
     target_channel = voice_state.channel
@@ -45,8 +45,8 @@ async def get_or_connect_voice_client(
             last_error = exc
             if exc.code == 4017:
                 await ctx.send(
-                    "Voice connection requires Discord DAVE/E2EE support. "
-                    "Upgrade to discord.py[voice] 2.7 or newer and restart the bot."
+                    "Kết nối thoại cần hỗ trợ Discord DAVE/E2EE. "
+                    "Hãy nâng cấp discord.py[voice] 2.7 trở lên rồi khởi động lại bot."
                 )
                 return None
         except (discord.ClientException, asyncio.TimeoutError, OSError) as exc:
@@ -63,6 +63,6 @@ async def get_or_connect_voice_client(
             await asyncio.sleep(attempt * 2)
 
     await ctx.send(
-        f"Could not connect to voice after {settings.voice_connect_retries} attempts."
+        f"Không thể kết nối thoại sau {settings.voice_connect_retries} lần thử."
     )
     return None

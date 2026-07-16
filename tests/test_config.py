@@ -13,7 +13,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.default_volume, 0.7)
         self.assertEqual(settings.voice_connect_retries, 3)
         self.assertTrue(settings.tts_enabled)
-        self.assertEqual(settings.tts_lang, "en")
+        self.assertEqual(settings.tts_lang, "vi")
         self.assertEqual(settings.music_duck_level, 0.2)
         self.assertNotIn("secret", repr(settings))
 

@@ -1,4 +1,7 @@
-"""User-facing music and voice-session commands."""
+"""User-facing music and voice-session commands.
+
+Discord replies are Vietnamese (customer UI). Developer comments stay English.
+"""
 
 from __future__ import annotations
 
@@ -35,27 +38,27 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command()
     @commands.guild_only()
     async def join(self, ctx: commands.Context[Any]) -> None:
-        """Join your voice channel and monitor that channel's text chat via TTS."""
+        """Join the caller's voice channel and monitor that channel's text chat via TTS."""
         voice_client = await get_or_connect_voice_client(ctx, self.settings)
         if voice_client is None:
             return
 
         channel = voice_client.channel
         if channel is None:
-            await ctx.send("Connected, but no voice channel is bound.")
+            await ctx.send("Đã kết nối nhưng không gắn được kênh thoại.")
             return
 
         if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            await ctx.send("Could not start a session on that channel type.")
+            await ctx.send("Không thể bắt đầu phiên trên loại kênh này.")
             return
 
         already = self.sessions.is_active(ctx.guild.id)
         session = self.sessions.start(ctx.guild, channel)
-        action = "Already in session" if already else "Joined"
+        action = "Đang trong phiên" if already else "Đã vào"
         await ctx.send(
-            f"{action}: monitoring **{discord.utils.escape_markdown(session.voice_channel_name)}** "
-            "text chat. Messages there are spoken with TTS. Use "
-            f"`{ctx.prefix}leave` to stop."
+            f"{action}: đang theo dõi chat của **{discord.utils.escape_markdown(session.voice_channel_name)}**. "
+            "Tin nhắn tại đó sẽ được đọc bằng TTS. Dùng "
+            f"`{ctx.prefix}leave` để thoát."
         )
 
     @commands.command()
@@ -68,13 +71,13 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.guild_only()
     async def play(self, ctx: commands.Context[Any], *, query: str) -> None:
         """Queue a URL for playback and join the caller's voice channel."""
-        await self._enqueue(ctx, query, "Queued")
+        await self._enqueue(ctx, query, "Đã xếp hàng")
 
     @commands.command(name="next")
     @commands.guild_only()
     async def add_next(self, ctx: commands.Context[Any], *, query: str) -> None:
         """Add a URL to the playback queue."""
-        await self._enqueue(ctx, query, "Added to queue")
+        await self._enqueue(ctx, query, "Đã thêm vào hàng đợi")
 
     @commands.command()
     @commands.guild_only()
@@ -82,9 +85,9 @@ class MusicCog(commands.Cog, name="Music"):
         voice_client = ctx.voice_client
         if voice_client and voice_client.is_playing():
             voice_client.pause()
-            await ctx.send("Paused.")
+            await ctx.send("Đã tạm dừng.")
             return
-        await ctx.send("Nothing is playing.")
+        await ctx.send("Không có gì đang phát.")
 
     @commands.command()
     @commands.guild_only()
@@ -92,28 +95,30 @@ class MusicCog(commands.Cog, name="Music"):
         voice_client = ctx.voice_client
         if voice_client and voice_client.is_paused():
             voice_client.resume()
-            await ctx.send("Resumed.")
+            await ctx.send("Đã tiếp tục.")
             return
-        await ctx.send("Playback is not paused.")
+        await ctx.send("Phát nhạc hiện không bị tạm dừng.")
 
     @commands.command()
     @commands.guild_only()
     async def skip(self, ctx: commands.Context[Any]) -> None:
         player = self.players.get(ctx.guild.id)
         if player and player.skip():
-            await ctx.send("Skipped.")
+            await ctx.send("Đã bỏ qua.")
             return
-        await ctx.send("Nothing is playing.")
+        await ctx.send("Không có gì đang phát.")
 
     @commands.command(name="loop")
     @commands.guild_only()
     async def loop_track(self, ctx: commands.Context[Any]) -> None:
         player = self.players.get(ctx.guild.id)
         if not player or player.current is None:
-            await ctx.send("Nothing is playing.")
+            await ctx.send("Không có gì đang phát.")
             return
         enabled = player.toggle_loop()
-        await ctx.send(f"Loop mode {'enabled' if enabled else 'disabled'}.")
+        await ctx.send(
+            f"Chế độ lặp {'đã bật' if enabled else 'đã tắt'}."
+        )
 
     @commands.command()
     @commands.guild_only()
@@ -129,25 +134,25 @@ class MusicCog(commands.Cog, name="Music"):
         if session_active:
             if had_player:
                 await ctx.send(
-                    "Stopped music. Chat TTS session is still active — "
-                    f"use `{ctx.prefix}leave` to leave."
+                    "Đã dừng nhạc. Phiên chat TTS vẫn đang chạy — "
+                    f"dùng `{ctx.prefix}leave` để thoát."
                 )
             else:
                 await ctx.send(
-                    "Nothing is playing. Chat TTS session is still active — "
-                    f"use `{ctx.prefix}leave` to leave."
+                    "Không có gì đang phát. Phiên chat TTS vẫn đang chạy — "
+                    f"dùng `{ctx.prefix}leave` để thoát."
                 )
             return
 
         voice_client = ctx.voice_client
         if voice_client and voice_client.is_connected():
             await voice_client.disconnect(force=True)
-            await ctx.send("Stopped and left the voice channel.")
+            await ctx.send("Đã dừng và rời kênh thoại.")
             return
         if had_player:
-            await ctx.send("Stopped.")
+            await ctx.send("Đã dừng.")
             return
-        await ctx.send("Nothing is playing.")
+        await ctx.send("Không có gì đang phát.")
 
     @commands.command(name="search")
     async def youtube_search(self, ctx: commands.Context[Any], *, query: str) -> None:
@@ -160,10 +165,10 @@ class MusicCog(commands.Cog, name="Music"):
                 return
 
         if not entries:
-            await ctx.send("No results found.")
+            await ctx.send("Không tìm thấy kết quả.")
             return
 
-        lines = ["**YouTube search results:**"]
+        lines = ["**Kết quả tìm kiếm YouTube:**"]
         for index, entry in enumerate(entries, 1):
             title = discord.utils.escape_markdown(entry.title)
             duration = format_duration(entry.duration)
@@ -215,7 +220,9 @@ class MusicCog(commands.Cog, name="Music"):
         player = self.players.get_or_create(ctx.guild)
         position = await player.enqueue(track, ctx.channel)
         title = discord.utils.escape_markdown(track.title)
-        await ctx.send(f"{confirmation}: **{title}** (queue position {position})")
+        await ctx.send(
+            f"{confirmation}: **{title}** (vị trí hàng đợi {position})"
+        )
 
     async def _leave_voice(self, ctx: commands.Context[Any]) -> None:
         """Stop music, end the chat session, and disconnect from voice."""
@@ -230,11 +237,11 @@ class MusicCog(commands.Cog, name="Music"):
 
         if had_player or had_session or disconnected:
             if had_session:
-                await ctx.send("Left the voice channel and stopped monitoring chat.")
+                await ctx.send("Đã rời kênh thoại và dừng theo dõi chat.")
             else:
-                await ctx.send("Left the voice channel.")
+                await ctx.send("Đã rời kênh thoại.")
             return
-        await ctx.send("The bot is not connected to voice.")
+        await ctx.send("Bot chưa kết nối kênh thoại.")
 
     async def cog_command_error(
         self,
@@ -242,10 +249,12 @@ class MusicCog(commands.Cog, name="Music"):
         error: commands.CommandError,
     ) -> None:
         if isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"Missing `{error.param.name}`. Use `{ctx.prefix}help {ctx.command}`.")
+            await ctx.send(
+                f"Thiếu `{error.param.name}`. Dùng `{ctx.prefix}help {ctx.command}`."
+            )
             return
         if isinstance(error, commands.NoPrivateMessage):
-            await ctx.send("This command can only be used in a server.")
+            await ctx.send("Lệnh này chỉ dùng được trong máy chủ.")
             return
 
         original = getattr(error, "original", error)
@@ -254,4 +263,4 @@ class MusicCog(commands.Cog, name="Music"):
             ctx.command,
             exc_info=(type(original), original, original.__traceback__),
         )
-        await ctx.send("The command failed unexpectedly. Check the bot logs.")
+        await ctx.send("Lệnh thất bại. Kiểm tra log của bot.")

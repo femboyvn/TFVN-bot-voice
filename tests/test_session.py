@@ -49,8 +49,8 @@ class ChatFilterTests(unittest.TestCase):
 class PrepareSpeechTests(unittest.TestCase):
     def test_formats_author_and_text(self) -> None:
         self.assertEqual(
-            prepare_chat_speech("hi there", author_name="Alex"),
-            "Alex says hi there",
+            prepare_chat_speech("xin chào", author_name="Alex"),
+            "Alex nói xin chào",
         )
 
     def test_truncates_long_content(self) -> None:
@@ -58,7 +58,7 @@ class PrepareSpeechTests(unittest.TestCase):
         self.assertIsNotNone(speech)
         assert speech is not None
         self.assertTrue(speech.endswith("…"))
-        self.assertLessEqual(len(speech), len("A says ") + 20)
+        self.assertLessEqual(len(speech), len("A nói ") + 20)
 
     def test_empty_returns_none(self) -> None:
         self.assertIsNone(prepare_chat_speech("  ", author_name="A"))

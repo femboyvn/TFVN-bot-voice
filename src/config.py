@@ -57,7 +57,7 @@ class Settings:
     voice_connect_retries: int = 3
     player_idle_timeout: float = 300.0
     tts_enabled: bool = True
-    tts_lang: str = "en"
+    tts_lang: str = "vi"
     # Music gain (0–1) while session/chat TTS is mixed over a playing track.
     music_duck_level: float = 0.2
 
@@ -82,7 +82,7 @@ class Settings:
             voice_connect_retries=_read_int(environment, "VOICE_CONNECT_RETRIES", 3),
             player_idle_timeout=_read_float(environment, "PLAYER_IDLE_TIMEOUT", 300.0),
             tts_enabled=_read_bool(environment, "TTS_ENABLED", True),
-            tts_lang=environment.get("TTS_LANG", "en").strip() or "en",
+            tts_lang=environment.get("TTS_LANG", "vi").strip() or "vi",
             music_duck_level=_read_float(environment, "MUSIC_DUCK_LEVEL", 0.2),
         )
         settings._validate()

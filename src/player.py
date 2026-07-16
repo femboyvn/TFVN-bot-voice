@@ -123,6 +123,7 @@ class GuildPlayer:
                 continue
 
             # Text + spoken announcements before music; TTS failures never block the queue.
+            # Status strings are Vietnamese (customer UI).
             await self._announce_now_playing(self.current)
 
             try:
@@ -133,7 +134,7 @@ class GuildPlayer:
             except Exception:
                 self._mixer = None
                 log.exception("Could not start playback in guild %s", self.guild.id)
-                await self._send("Could not start the queued track.")
+                await self._send("Không thể phát bài trong hàng đợi.")
                 self.current = None
                 continue
 
@@ -144,7 +145,7 @@ class GuildPlayer:
         """Send text status and speak the same announcement in the voice channel."""
         title = track.title
         await self._send(
-            f"Now playing: **{discord.utils.escape_markdown(title)}**"
+            f"Đang phát: **{discord.utils.escape_markdown(title)}**"
         )
         if not self.tts_enabled or self.tts is None:
             return
