@@ -16,6 +16,17 @@ PCM_FRAME_SIZE = 3840
 DEFAULT_DUCK_LEVEL = 0.2
 
 
+def _as_discord_frame(data: bytes) -> bytes:
+    """Pad/trim to one Discord audio frame so playback does not glitch/cut early."""
+    if not data:
+        return b""
+    if len(data) == PCM_FRAME_SIZE:
+        return data
+    if len(data) < PCM_FRAME_SIZE:
+        return data + b"\x00" * (PCM_FRAME_SIZE - len(data))
+    return data[:PCM_FRAME_SIZE]
+
+
 def mix_pcm16_frames(
     primary: bytes,
     secondary: bytes,
@@ -145,11 +156,13 @@ class DuckingAudioSource(discord.AudioSource):
         if not primary_data and not secondary_data:
             return b""
         if secondary is None or not secondary_data:
-            return primary_data
+            return _as_discord_frame(primary_data)
         if not primary_data:
             # Music ended mid-TTS: finish speaking alone.
-            return secondary_data
-        return mix_pcm16_frames(primary_data, secondary_data, duck_level=duck)
+            return _as_discord_frame(secondary_data)
+        return _as_discord_frame(
+            mix_pcm16_frames(primary_data, secondary_data, duck_level=duck)
+        )
 
     def is_opus(self) -> bool:
         return False

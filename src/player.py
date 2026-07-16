@@ -13,11 +13,11 @@ import discord
 from .ducking import DEFAULT_DUCK_LEVEL, DuckingAudioSource
 from .media import MediaService, Track
 from .tts import (
-    TTS_PLAYBACK_TIMEOUT,
     TTSError,
     TextToSpeech,
     now_playing_speech,
     play_tts_on_voice_client,
+    tts_playback_timeout,
 )
 
 log = logging.getLogger(__name__)
@@ -194,17 +194,24 @@ class GuildPlayer:
 
         # Keep volume transformer on TTS; mixer only ducks the music (primary).
         done = mixer.inject_secondary(source)
+        play_timeout = tts_playback_timeout(text)
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(done.wait),
-                timeout=TTS_PLAYBACK_TIMEOUT,
+                timeout=play_timeout,
             )
             return True
         except TimeoutError:
-            log.warning("Ducked TTS timed out in guild %s", self.guild.id)
+            log.warning(
+                "Ducked TTS timed out after %.1fs in guild %s",
+                play_timeout,
+                self.guild.id,
+            )
             mixer.clear_secondary()
             return False
         finally:
+            # FFmpeg may still hold the file briefly after the secondary ends.
+            await asyncio.sleep(0.05)
             if audio_path is not None:
                 with contextlib.suppress(OSError):
                     audio_path.unlink(missing_ok=True)

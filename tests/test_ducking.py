@@ -57,7 +57,10 @@ class DuckingAudioSourceTests(unittest.TestCase):
     def test_passes_through_primary_without_secondary(self) -> None:
         chunk = _frame_from_sample(100, 8)
         mixer = DuckingAudioSource(_ConstantSource([chunk, b""]), duck_level=0.2)
-        self.assertEqual(mixer.read(), chunk)
+        first = mixer.read()
+        # Mixer pads to a full Discord frame so real playback does not cut early.
+        self.assertEqual(first[: len(chunk)], chunk)
+        self.assertEqual(len(first), 3840)
         self.assertEqual(mixer.read(), b"")
 
     def test_ducks_primary_while_secondary_active(self) -> None:
@@ -69,11 +72,11 @@ class DuckingAudioSourceTests(unittest.TestCase):
         )
         done = mixer.inject_secondary(_ConstantSource([secondary_chunk, b""]))
         first = mixer.read()
-        samples = struct.unpack("<" + "h" * 4, first)
+        samples = struct.unpack("<" + "h" * 4, first[:8])
         self.assertEqual(samples[0], 2000)
         # Secondary ends on next read; music continues at full level.
         second = mixer.read()
-        samples2 = struct.unpack("<" + "h" * 4, second)
+        samples2 = struct.unpack("<" + "h" * 4, second[:8])
         self.assertEqual(samples2[0], 10000)
         self.assertTrue(done.is_set())
 

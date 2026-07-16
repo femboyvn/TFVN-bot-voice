@@ -23,8 +23,16 @@ TTS_FFMPEG_OPTIONS: dict[str, str] = {
     "options": "-vn",
 }
 
-# Cap how long a TTS clip can block a caller.
-TTS_PLAYBACK_TIMEOUT = 60.0
+# Base cap for short clips; longer text gets a scaled timeout (see helper below).
+TTS_PLAYBACK_TIMEOUT = 90.0
+TTS_PLAYBACK_TIMEOUT_MAX = 300.0
+
+
+def tts_playback_timeout(text: str) -> float:
+    """Seconds to allow for speaking *text* (scales with length; Vietnamese is slower)."""
+    # ~0.12s per character + headroom for synthesis/FFmpeg startup.
+    scaled = 12.0 + len(text) * 0.14
+    return max(TTS_PLAYBACK_TIMEOUT, min(TTS_PLAYBACK_TIMEOUT_MAX, scaled))
 
 Synthesizer = Callable[[str, Path], None]
 
@@ -119,7 +127,7 @@ async def play_tts_on_voice_client(
     text: str,
     *,
     volume: float,
-    timeout: float = TTS_PLAYBACK_TIMEOUT,
+    timeout: float | None = None,
     skip_if_busy: bool = True,
 ) -> bool:
     """Synthesize *text* and play it on *voice_client*.
@@ -133,6 +141,8 @@ async def play_tts_on_voice_client(
     if skip_if_busy and (voice_client.is_playing() or voice_client.is_paused()):
         log.warning("Voice client busy; skipping TTS")
         return False
+
+    play_timeout = timeout if timeout is not None else tts_playback_timeout(text)
 
     audio_path: Path | None = None
     try:
@@ -162,9 +172,9 @@ async def play_tts_on_voice_client(
             return False
         voice_client.play(source, after=after)
         try:
-            await asyncio.wait_for(finished.wait(), timeout=timeout)
+            await asyncio.wait_for(finished.wait(), timeout=play_timeout)
         except TimeoutError:
-            log.warning("TTS playback timed out")
+            log.warning("TTS playback timed out after %.1fs", play_timeout)
             if voice_client.is_playing():
                 voice_client.stop()
             with contextlib.suppress(TimeoutError):

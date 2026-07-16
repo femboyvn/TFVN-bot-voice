@@ -14,10 +14,12 @@ from .tts import TextToSpeech, play_tts_on_voice_client
 
 log = logging.getLogger(__name__)
 
-# Bound speech length so gTTS stays responsive.
-DEFAULT_MAX_SPEECH_CHARS = 300
+# Allow full Discord-length messages (was 300 and cut people off mid-sentence).
+DEFAULT_MAX_SPEECH_CHARS = 2000
+# gTTS is happier with moderate chunks; long lines are split and spoken in order.
+DEFAULT_TTS_CHUNK_CHARS = 400
 # Drop backlog rather than speaking minutes of delayed chat.
-DEFAULT_SPEECH_QUEUE_MAX = 12
+DEFAULT_SPEECH_QUEUE_MAX = 24
 # How long to wait for the voice client to free up (e.g. previous TTS clip).
 _BUSY_WAIT_SECONDS = 90.0
 _BUSY_POLL = 0.25
@@ -47,6 +49,21 @@ def is_session_chat_message(
     return True
 
 
+def _truncate_at_word(text: str, max_chars: int) -> str:
+    """Truncate at a word boundary when possible (avoid mid-word cutoffs)."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    if max_chars == 1:
+        return "…"
+    budget = max_chars - 1
+    snippet = text[:budget].rstrip()
+    if " " in snippet:
+        cut = snippet.rsplit(" ", 1)[0].rstrip()
+        if cut:
+            snippet = cut
+    return snippet + "…"
+
+
 def prepare_chat_speech(
     content: str,
     *,
@@ -57,11 +74,52 @@ def prepare_chat_speech(
     cleaned = content.strip()
     if not cleaned:
         return None
-    if len(cleaned) > max_chars:
-        cleaned = cleaned[: max_chars - 1].rstrip() + "…"
     # Vietnamese customer-facing speech template.
     name = (author_name or "Ai đó").strip() or "Ai đó"
-    return f"{name} nói {cleaned}"
+    prefix = f"{name} nói "
+    # Reserve room for the speaker prefix so the body is not over-truncated.
+    body_budget = max(1, max_chars - len(prefix))
+    if len(cleaned) > body_budget:
+        cleaned = _truncate_at_word(cleaned, body_budget)
+    return f"{prefix}{cleaned}"
+
+
+def chunk_speech_text(
+    text: str,
+    *,
+    max_chunk_chars: int = DEFAULT_TTS_CHUNK_CHARS,
+) -> list[str]:
+    """Split speech into ordered chunks for reliable TTS synthesis/playback.
+
+    Prefers sentence / word boundaries so lines are not cut mid-phrase when
+    possible. Short text returns a single chunk.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    if max_chunk_chars <= 0 or len(cleaned) <= max_chunk_chars:
+        return [cleaned]
+
+    chunks: list[str] = []
+    remaining = cleaned
+    while remaining:
+        if len(remaining) <= max_chunk_chars:
+            chunks.append(remaining)
+            break
+        window = remaining[:max_chunk_chars]
+        split_at = -1
+        for sep in (". ", "! ", "? ", "… ", "; ", ", ", " "):
+            idx = window.rfind(sep)
+            if idx > max_chunk_chars // 4:
+                split_at = idx + len(sep)
+                break
+        if split_at <= 0:
+            split_at = max_chunk_chars
+        piece = remaining[:split_at].strip()
+        if piece:
+            chunks.append(piece)
+        remaining = remaining[split_at:].lstrip()
+    return chunks
 
 
 class VoiceSession:
@@ -77,6 +135,7 @@ class VoiceSession:
         volume: float,
         get_player: PlayerLookup | None = None,
         max_speech_chars: int = DEFAULT_MAX_SPEECH_CHARS,
+        tts_chunk_chars: int = DEFAULT_TTS_CHUNK_CHARS,
         queue_max: int = DEFAULT_SPEECH_QUEUE_MAX,
     ) -> None:
         self.bot = bot
@@ -87,6 +146,7 @@ class VoiceSession:
         self.volume = volume
         self.get_player = get_player or (lambda _gid: None)
         self.max_speech_chars = max_speech_chars
+        self.tts_chunk_chars = tts_chunk_chars
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=queue_max)
         self._closed = False
         self._task = asyncio.create_task(
@@ -153,7 +213,15 @@ class VoiceSession:
         )
         if speech is None:
             return False
-        return self.enqueue_speech(speech)
+        # Enqueue in order so long messages finish fully instead of one truncated clip.
+        segments = chunk_speech_text(speech, max_chunk_chars=self.tts_chunk_chars)
+        if not segments:
+            return False
+        queued_any = False
+        for segment in segments:
+            if self.enqueue_speech(segment):
+                queued_any = True
+        return queued_any
 
     async def close(self) -> None:
         if self._closed:

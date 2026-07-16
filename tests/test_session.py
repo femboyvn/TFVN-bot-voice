@@ -9,6 +9,7 @@ from unittest.mock import Mock
 from src.session import (
     SessionManager,
     VoiceSession,
+    chunk_speech_text,
     is_session_chat_message,
     prepare_chat_speech,
 )
@@ -53,15 +54,42 @@ class PrepareSpeechTests(unittest.TestCase):
             "Alex nói xin chào",
         )
 
-    def test_truncates_long_content(self) -> None:
-        speech = prepare_chat_speech("x" * 500, author_name="A", max_chars=20)
+    def test_truncates_long_content_at_word_boundary(self) -> None:
+        speech = prepare_chat_speech(
+            "hello world and more words here",
+            author_name="A",
+            max_chars=20,
+        )
         self.assertIsNotNone(speech)
         assert speech is not None
         self.assertTrue(speech.endswith("…"))
-        self.assertLessEqual(len(speech), len("A nói ") + 20)
+        self.assertLessEqual(len(speech), 20)
+        # Should not cut inside the first word when space-splitting is possible.
+        self.assertTrue(speech.startswith("A nói "))
+
+    def test_keeps_long_discord_length_messages(self) -> None:
+        body = ("xin chào các bạn " * 80).strip()  # well over old 300 limit
+        speech = prepare_chat_speech(body, author_name="Lan")
+        self.assertIsNotNone(speech)
+        assert speech is not None
+        self.assertIn("xin chào", speech)
+        self.assertGreater(len(speech), 300)
 
     def test_empty_returns_none(self) -> None:
         self.assertIsNone(prepare_chat_speech("  ", author_name="A"))
+
+
+class ChunkSpeechTests(unittest.TestCase):
+    def test_short_text_single_chunk(self) -> None:
+        self.assertEqual(chunk_speech_text("hello"), ["hello"])
+
+    def test_splits_long_text_without_losing_content(self) -> None:
+        text = "alpha beta gamma delta epsilon zeta eta theta"
+        chunks = chunk_speech_text(text, max_chunk_chars=20)
+        self.assertGreater(len(chunks), 1)
+        rejoined = " ".join(chunks)
+        for word in text.split():
+            self.assertIn(word, rejoined)
 
 
 class VoiceSessionOfferTests(unittest.IsolatedAsyncioTestCase):
