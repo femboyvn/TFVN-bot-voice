@@ -62,7 +62,7 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.guild_only()
     async def leave(self, ctx: commands.Context[Any]) -> None:
         """End the voice-chat session, stop music, and disconnect."""
-        await self._leave_voice(ctx, stopped_music=False)
+        await self._leave_voice(ctx)
 
     @commands.command()
     @commands.guild_only()
@@ -118,8 +118,36 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command()
     @commands.guild_only()
     async def stop(self, ctx: commands.Context[Any]) -> None:
-        """Stop music, end any chat session, and leave the voice channel."""
-        await self._leave_voice(ctx, stopped_music=True)
+        """Stop music and clear the queue. TTS session stays until ``leave``."""
+        session_active = self.sessions.is_active(ctx.guild.id)
+        # Keep the voice connection when a chat session is still running.
+        had_player = await self.players.remove(
+            ctx.guild.id,
+            disconnect=not session_active,
+        )
+
+        if session_active:
+            if had_player:
+                await ctx.send(
+                    "Stopped music. Chat TTS session is still active — "
+                    f"use `{ctx.prefix}leave` to leave."
+                )
+            else:
+                await ctx.send(
+                    "Nothing is playing. Chat TTS session is still active — "
+                    f"use `{ctx.prefix}leave` to leave."
+                )
+            return
+
+        voice_client = ctx.voice_client
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect(force=True)
+            await ctx.send("Stopped and left the voice channel.")
+            return
+        if had_player:
+            await ctx.send("Stopped.")
+            return
+        await ctx.send("Nothing is playing.")
 
     @commands.command(name="search")
     async def youtube_search(self, ctx: commands.Context[Any], *, query: str) -> None:
@@ -189,12 +217,8 @@ class MusicCog(commands.Cog, name="Music"):
         title = discord.utils.escape_markdown(track.title)
         await ctx.send(f"{confirmation}: **{title}** (queue position {position})")
 
-    async def _leave_voice(
-        self,
-        ctx: commands.Context[Any],
-        *,
-        stopped_music: bool,
-    ) -> None:
+    async def _leave_voice(self, ctx: commands.Context[Any]) -> None:
+        """Stop music, end the chat session, and disconnect from voice."""
         had_player = await self.players.remove(ctx.guild.id, disconnect=False)
         had_session = await self.sessions.stop(ctx.guild.id)
 
@@ -205,9 +229,7 @@ class MusicCog(commands.Cog, name="Music"):
             disconnected = True
 
         if had_player or had_session or disconnected:
-            if stopped_music and (had_player or had_session):
-                await ctx.send("Stopped, ended chat session, and left the voice channel.")
-            elif had_session:
+            if had_session:
                 await ctx.send("Left the voice channel and stopped monitoring chat.")
             else:
                 await ctx.send("Left the voice channel.")

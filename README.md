@@ -37,7 +37,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd resume` | Resume playback |
 | `!tfd skip` | Skip the current track |
 | `!tfd loop` | Toggle looping for the current track |
-| `!tfd stop` | Stop music, end session, and leave voice |
+| `!tfd stop` | Stop music only (TTS session keeps running if you used `join`) |
 | `!tfd search <query>` | Show five YouTube search results |
 
 ### Voice-chat session (join + monitor)
@@ -47,10 +47,15 @@ The default prefix is `!tfd `, including the trailing space.
 3. Type in that **voice channel's text chat** — the bot speaks  
    `"{display name} says {message}"` into the call.
 4. Bot commands (`!tfd …`) are not read aloud.
-5. `!tfd leave` or `!tfd stop` ends monitoring and disconnects.
+5. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
+6. `!tfd leave` ends monitoring and disconnects.
 
 While a session is active, the bot stays in the VC even after the music queue goes idle.
 Chat TTS requires `TTS_ENABLED=true` (default) and network access for gTTS.
+
+If music is playing when someone types in VC chat, the bot **ducks** the track (lowers
+music volume), speaks the message over it, then restores full music volume. Tune with
+`MUSIC_DUCK_LEVEL` (default `0.2` = 20% music while speaking).
 
 ## Project layout
 
@@ -63,6 +68,7 @@ src/
   media.py        # yt-dlp and FFmpeg integration
   player.py       # per-guild queues and playback workers
   session.py      # join-session: monitor VC text chat via TTS
+  ducking.py      # mix TTS over music with volume ducking
   tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
   cogs/music.py   # user-facing commands

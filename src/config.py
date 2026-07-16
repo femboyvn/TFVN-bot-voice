@@ -58,6 +58,8 @@ class Settings:
     player_idle_timeout: float = 300.0
     tts_enabled: bool = True
     tts_lang: str = "en"
+    # Music gain (0–1) while session/chat TTS is mixed over a playing track.
+    music_duck_level: float = 0.2
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -81,6 +83,7 @@ class Settings:
             player_idle_timeout=_read_float(environment, "PLAYER_IDLE_TIMEOUT", 300.0),
             tts_enabled=_read_bool(environment, "TTS_ENABLED", True),
             tts_lang=environment.get("TTS_LANG", "en").strip() or "en",
+            music_duck_level=_read_float(environment, "MUSIC_DUCK_LEVEL", 0.2),
         )
         settings._validate()
         return settings
@@ -98,3 +101,5 @@ class Settings:
             raise ConfigurationError("PLAYER_IDLE_TIMEOUT must be positive")
         if not self.tts_lang:
             raise ConfigurationError("TTS_LANG cannot be empty")
+        if not 0.0 <= self.music_duck_level <= 1.0:
+            raise ConfigurationError("MUSIC_DUCK_LEVEL must be between 0 and 1")

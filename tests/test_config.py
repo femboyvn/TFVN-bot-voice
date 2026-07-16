@@ -14,6 +14,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.voice_connect_retries, 3)
         self.assertTrue(settings.tts_enabled)
         self.assertEqual(settings.tts_lang, "en")
+        self.assertEqual(settings.music_duck_level, 0.2)
         self.assertNotIn("secret", repr(settings))
 
     def test_loads_overrides(self) -> None:
@@ -27,6 +28,7 @@ class SettingsTests(unittest.TestCase):
                 "PLAYER_IDLE_TIMEOUT": "60",
                 "TTS_ENABLED": "false",
                 "TTS_LANG": "vi",
+                "MUSIC_DUCK_LEVEL": "0.15",
             }
         )
 
@@ -37,6 +39,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.player_idle_timeout, 60.0)
         self.assertFalse(settings.tts_enabled)
         self.assertEqual(settings.tts_lang, "vi")
+        self.assertEqual(settings.music_duck_level, 0.15)
 
     def test_requires_token(self) -> None:
         with self.assertRaisesRegex(ConfigurationError, "DISCORD_TOKEN"):

@@ -6,11 +6,19 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import discord
 
+from .ducking import DEFAULT_DUCK_LEVEL, DuckingAudioSource
 from .media import MediaService, Track
-from .tts import TextToSpeech, now_playing_speech, play_tts_on_voice_client
+from .tts import (
+    TTS_PLAYBACK_TIMEOUT,
+    TTSError,
+    TextToSpeech,
+    now_playing_speech,
+    play_tts_on_voice_client,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +40,7 @@ class GuildPlayer:
         on_idle: IdleCallback,
         tts: TextToSpeech | None = None,
         tts_enabled: bool = True,
+        duck_level: float = DEFAULT_DUCK_LEVEL,
     ) -> None:
         self.bot = bot
         self.guild = guild
@@ -41,12 +50,14 @@ class GuildPlayer:
         self.on_idle = on_idle
         self.tts = tts
         self.tts_enabled = tts_enabled
+        self.duck_level = duck_level
         self.current: Track | None = None
         self.loop_current = False
         self._queue: asyncio.Queue[Track] = asyncio.Queue()
         self._playback_finished = asyncio.Event()
         self._announce_channel: discord.abc.Messageable | None = None
         self._closed = False
+        self._mixer: DuckingAudioSource | None = None
         self._task = asyncio.create_task(
             self._player_loop(),
             name=f"guild-player-{guild.id}",
@@ -116,14 +127,18 @@ class GuildPlayer:
 
             try:
                 source = self.media.create_audio_source(self.current, volume=self.volume)
-                voice_client.play(source, after=self._after_playback)
+                mixer = DuckingAudioSource(source, duck_level=self.duck_level)
+                self._mixer = mixer
+                voice_client.play(mixer, after=self._after_playback)
             except Exception:
+                self._mixer = None
                 log.exception("Could not start playback in guild %s", self.guild.id)
                 await self._send("Could not start the queued track.")
                 self.current = None
                 continue
 
             await self._playback_finished.wait()
+            self._mixer = None
 
     async def _announce_now_playing(self, track: Track) -> None:
         """Send text status and speak the same announcement in the voice channel."""
@@ -149,9 +164,54 @@ class GuildPlayer:
             skip_if_busy=True,
         )
 
+    async def speak_over_music(self, text: str) -> bool:
+        """Duck music and mix TTS over it. Returns False if music is not playing."""
+        mixer = self._mixer
+        voice_client = self.guild.voice_client
+        if (
+            mixer is None
+            or self.tts is None
+            or not voice_client
+            or not voice_client.is_connected()
+            or not voice_client.is_playing()
+        ):
+            return False
+
+        audio_path: Path | None = None
+        try:
+            source, audio_path = await asyncio.to_thread(
+                self.tts.create_audio_source,
+                text,
+                volume=self.volume,
+            )
+        except TTSError as exc:
+            log.warning("TTS synthesis skipped in guild %s: %s", self.guild.id, exc)
+            return False
+        except Exception:
+            log.exception("Unexpected TTS failure in guild %s", self.guild.id)
+            return False
+
+        # Keep volume transformer on TTS; mixer only ducks the music (primary).
+        done = mixer.inject_secondary(source)
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(done.wait),
+                timeout=TTS_PLAYBACK_TIMEOUT,
+            )
+            return True
+        except TimeoutError:
+            log.warning("Ducked TTS timed out in guild %s", self.guild.id)
+            mixer.clear_secondary()
+            return False
+        finally:
+            if audio_path is not None:
+                with contextlib.suppress(OSError):
+                    audio_path.unlink(missing_ok=True)
+
     def _after_playback(self, error: Exception | None) -> None:
         if error:
             log.error("Playback failed in guild %s: %s", self.guild.id, error)
+        self._mixer = None
         self.bot.loop.call_soon_threadsafe(self._playback_finished.set)
 
     async def _send(self, message: str) -> None:
@@ -182,6 +242,7 @@ class PlayerManager:
         idle_timeout: float,
         tts: TextToSpeech | None = None,
         tts_enabled: bool = True,
+        duck_level: float = DEFAULT_DUCK_LEVEL,
         keep_connected: KeepConnected | None = None,
     ) -> None:
         self.bot = bot
@@ -190,6 +251,7 @@ class PlayerManager:
         self.idle_timeout = idle_timeout
         self.tts = tts
         self.tts_enabled = tts_enabled
+        self.duck_level = duck_level
         self.keep_connected = keep_connected or (lambda _guild_id: False)
         self._players: dict[int, GuildPlayer] = {}
 
@@ -208,6 +270,7 @@ class PlayerManager:
                 on_idle=self._remove_idle,
                 tts=self.tts,
                 tts_enabled=self.tts_enabled,
+                duck_level=self.duck_level,
             )
             self._players[guild.id] = player
         return player

@@ -1,0 +1,94 @@
+"""Tests for PCM ducking / TTS overlay mixer."""
+
+from __future__ import annotations
+
+import struct
+import unittest
+
+import discord
+
+from src.ducking import DuckingAudioSource, mix_pcm16_frames
+
+
+def _frame_from_sample(sample: int, frames: int = 10) -> bytes:
+    """Build a short stereo-ish PCM buffer (2 bytes per sample, mono packed as s16)."""
+    return struct.pack("<" + "h" * frames, *([sample] * frames))
+
+
+class MixPcmTests(unittest.TestCase):
+    def test_duck_reduces_primary_when_secondary_present(self) -> None:
+        # primary = 10000, secondary = 0, duck 0.2 → ~2000
+        primary = _frame_from_sample(10000, 4)
+        secondary = _frame_from_sample(0, 4)
+        mixed = mix_pcm16_frames(primary, secondary, duck_level=0.2)
+        samples = struct.unpack("<" + "h" * 4, mixed)
+        self.assertEqual(samples[0], 2000)
+
+    def test_adds_secondary_on_top(self) -> None:
+        primary = _frame_from_sample(1000, 2)
+        secondary = _frame_from_sample(500, 2)
+        mixed = mix_pcm16_frames(primary, secondary, duck_level=0.5)
+        samples = struct.unpack("<hh", mixed)
+        # 1000 * 0.5 + 500 = 1000
+        self.assertEqual(samples[0], 1000)
+
+    def test_clamps_overflow(self) -> None:
+        primary = _frame_from_sample(30000, 1)
+        secondary = _frame_from_sample(20000, 1)
+        mixed = mix_pcm16_frames(primary, secondary, duck_level=1.0)
+        (sample,) = struct.unpack("<h", mixed)
+        self.assertEqual(sample, 32767)
+
+
+class _ConstantSource(discord.AudioSource):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    def read(self) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def cleanup(self) -> None:
+        return None
+
+
+class DuckingAudioSourceTests(unittest.TestCase):
+    def test_passes_through_primary_without_secondary(self) -> None:
+        chunk = _frame_from_sample(100, 8)
+        mixer = DuckingAudioSource(_ConstantSource([chunk, b""]), duck_level=0.2)
+        self.assertEqual(mixer.read(), chunk)
+        self.assertEqual(mixer.read(), b"")
+
+    def test_ducks_primary_while_secondary_active(self) -> None:
+        primary_chunk = _frame_from_sample(10000, 4)
+        secondary_chunk = _frame_from_sample(0, 4)
+        mixer = DuckingAudioSource(
+            _ConstantSource([primary_chunk, primary_chunk, b""]),
+            duck_level=0.2,
+        )
+        done = mixer.inject_secondary(_ConstantSource([secondary_chunk, b""]))
+        first = mixer.read()
+        samples = struct.unpack("<" + "h" * 4, first)
+        self.assertEqual(samples[0], 2000)
+        # Secondary ends on next read; music continues at full level.
+        second = mixer.read()
+        samples2 = struct.unpack("<" + "h" * 4, second)
+        self.assertEqual(samples2[0], 10000)
+        self.assertTrue(done.is_set())
+
+    def test_inject_replaces_previous_secondary(self) -> None:
+        mixer = DuckingAudioSource(
+            _ConstantSource([_frame_from_sample(0, 2)] * 5),
+            duck_level=0.2,
+        )
+        first_done = mixer.inject_secondary(_ConstantSource([_frame_from_sample(1, 2)] * 10))
+        second_done = mixer.inject_secondary(_ConstantSource([_frame_from_sample(2, 2), b""]))
+        self.assertTrue(first_done.is_set())
+        mixer.read()
+        mixer.read()
+        self.assertTrue(second_done.is_set())
+
+
+if __name__ == "__main__":
+    unittest.main()

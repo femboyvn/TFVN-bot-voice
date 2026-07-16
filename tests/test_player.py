@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
 
+from src.ducking import DuckingAudioSource
 from src.media import Track
 from src.player import GuildPlayer, PlayerManager
 from src.tts import TTSError, TextToSpeech, now_playing_speech
@@ -143,7 +145,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
     async def test_player_loop_plays_music_after_tts_and_keeps_queue(self) -> None:
         """Full loop: TTS announce → music play; second track still dequeued."""
         media = Mock()
-        music_source = MagicMock(name="music_source")
+        music_source = _FakeAudioSource()
         media.create_audio_source.return_value = music_source
 
         tts = TextToSpeech(synthesizer=_write_fake_mp3)
@@ -161,9 +163,10 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         play_calls: list[str] = []
 
         def play_side_effect(source, *, after=None):
-            # First call is TTS (PCMVolumeTransformer), second is music (our mock).
-            if source is music_source:
+            # Announce TTS is PCMVolumeTransformer; music is wrapped in DuckingAudioSource.
+            if isinstance(source, DuckingAudioSource):
                 play_calls.append("music")
+                self.assertIs(source.primary, music_source)
             else:
                 play_calls.append("tts")
             if after is not None:
@@ -206,7 +209,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_player_loop_continues_music_when_tts_fails(self) -> None:
         media = Mock()
-        music_source = MagicMock(name="music_source")
+        music_source = _FakeAudioSource()
         media.create_audio_source.return_value = music_source
 
         def fail_synth(_text: str, _dest: Path) -> None:
@@ -247,11 +250,66 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
         media.create_audio_source.assert_called_once()
         voice_client.play.assert_called()
-        # Music source was played despite TTS failure.
+        # Music still plays (via ducking mixer) despite TTS failure.
         self.assertTrue(
-            any(call.args[0] is music_source for call in voice_client.play.call_args_list)
+            any(
+                isinstance(call.args[0], DuckingAudioSource)
+                and call.args[0].primary is music_source
+                for call in voice_client.play.call_args_list
+            )
         )
         channel.send.assert_awaited()
+
+    async def test_speak_over_music_injects_tts_into_mixer(self) -> None:
+        class _FiniteSource(discord.AudioSource):
+            def __init__(self) -> None:
+                self._left = 2
+
+            def read(self) -> bytes:
+                if self._left <= 0:
+                    return b""
+                self._left -= 1
+                return b"\x00" * 16
+
+            def cleanup(self) -> None:
+                return None
+
+        music = _FakeAudioSource()
+        mixer = DuckingAudioSource(music, duck_level=0.2)
+        player = object.__new__(GuildPlayer)
+        player.bot = Mock()
+        player.bot.loop = asyncio.get_running_loop()
+        player.guild = Mock()
+        player.guild.id = 1
+        player.volume = 0.7
+        player.tts = TextToSpeech(synthesizer=_write_fake_mp3)
+        player._mixer = mixer
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = True
+        player.guild.voice_client = voice_client
+
+        finite = _FiniteSource()
+
+        async def pump_mixer() -> None:
+            # Drive the mixer so the injected secondary can finish.
+            for _ in range(10):
+                await asyncio.sleep(0)
+                if mixer.read() == b"" and not mixer.is_ducking:
+                    break
+
+        with patch("src.tts.discord.FFmpegPCMAudio", return_value=finite):
+            pump = asyncio.create_task(pump_mixer())
+            try:
+                ok = await asyncio.wait_for(
+                    player.speak_over_music("hello world"),
+                    timeout=2.0,
+                )
+            finally:
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
+        self.assertTrue(ok)
 
 
 class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):

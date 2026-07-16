@@ -39,8 +39,10 @@ class VoiceBot(commands.Bot):
             idle_timeout=settings.player_idle_timeout,
             tts=self.tts,
             tts_enabled=settings.tts_enabled,
+            duck_level=settings.music_duck_level,
             keep_connected=self.sessions.keep_connected,
         )
+        self.sessions.bind_players(self.players)
 
     async def setup_hook(self) -> None:
         await self.add_cog(

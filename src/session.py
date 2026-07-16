@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import discord
 
+from .player import GuildPlayer, PlayerManager
 from .tts import TextToSpeech, play_tts_on_voice_client
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ DEFAULT_SPEECH_QUEUE_MAX = 12
 # How long to wait for the voice client to free up (e.g. previous TTS clip).
 _BUSY_WAIT_SECONDS = 90.0
 _BUSY_POLL = 0.25
+
+PlayerLookup = Callable[[int], GuildPlayer | None]
 
 
 def is_session_chat_message(
@@ -71,6 +74,7 @@ class VoiceSession:
         tts: TextToSpeech,
         *,
         volume: float,
+        get_player: PlayerLookup | None = None,
         max_speech_chars: int = DEFAULT_MAX_SPEECH_CHARS,
         queue_max: int = DEFAULT_SPEECH_QUEUE_MAX,
     ) -> None:
@@ -80,6 +84,7 @@ class VoiceSession:
         self.voice_channel_name = voice_channel.name
         self.tts = tts
         self.volume = volume
+        self.get_player = get_player or (lambda _gid: None)
         self.max_speech_chars = max_speech_chars
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=queue_max)
         self._closed = False
@@ -181,6 +186,14 @@ class VoiceSession:
         if not voice_client.is_connected():
             return
 
+        # Prefer ducking over the current track so music keeps playing underneath.
+        player = self.get_player(self.guild.id)
+        if player is not None:
+            ducked = await player.speak_over_music(text)
+            if ducked:
+                return
+
+        # No active music mixer: wait for a free client, then play TTS alone.
         waited = 0.0
         while (
             not self._closed
@@ -188,6 +201,9 @@ class VoiceSession:
             and (voice_client.is_playing() or voice_client.is_paused())
             and waited < _BUSY_WAIT_SECONDS
         ):
+            # Music may have started while we were synthesizing earlier; retry duck.
+            if player is not None and await player.speak_over_music(text):
+                return
             await asyncio.sleep(_BUSY_POLL)
             waited += _BUSY_POLL
 
@@ -219,11 +235,17 @@ class SessionManager:
         tts: TextToSpeech,
         *,
         volume: float,
+        players: PlayerManager | None = None,
     ) -> None:
         self.bot = bot
         self.tts = tts
         self.volume = volume
+        self.players = players
         self._sessions: dict[int, VoiceSession] = {}
+
+    def bind_players(self, players: PlayerManager) -> None:
+        """Attach the player manager after construction (breaks init cycles)."""
+        self.players = players
 
     def get(self, guild_id: int) -> VoiceSession | None:
         return self._sessions.get(guild_id)
@@ -242,12 +264,14 @@ class SessionManager:
             existing.rebind_channel(voice_channel)
             return existing
 
+        players = self.players
         session = VoiceSession(
             self.bot,
             guild,
             voice_channel,
             self.tts,
             volume=self.volume,
+            get_player=(players.get if players is not None else None),
         )
         self._sessions[guild.id] = session
         return session
