@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from tfd_voice_bot.media import format_duration
+from src.media import format_duration
 
 
 class FormatDurationTests(unittest.TestCase):

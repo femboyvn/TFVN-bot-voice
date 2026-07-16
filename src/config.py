@@ -33,6 +33,18 @@ def _read_int(environment: Mapping[str, str], name: str, default: int) -> int:
         raise ConfigurationError(f"{name} must be an integer") from exc
 
 
+def _read_bool(environment: Mapping[str, str], name: str, default: bool) -> bool:
+    raw_value = environment.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be a boolean (true/false)")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Runtime settings with conservative production defaults."""
@@ -44,6 +56,8 @@ class Settings:
     voice_connect_timeout: float = 20.0
     voice_connect_retries: int = 3
     player_idle_timeout: float = 300.0
+    tts_enabled: bool = True
+    tts_lang: str = "en"
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -65,6 +79,8 @@ class Settings:
             ),
             voice_connect_retries=_read_int(environment, "VOICE_CONNECT_RETRIES", 3),
             player_idle_timeout=_read_float(environment, "PLAYER_IDLE_TIMEOUT", 300.0),
+            tts_enabled=_read_bool(environment, "TTS_ENABLED", True),
+            tts_lang=environment.get("TTS_LANG", "en").strip() or "en",
         )
         settings._validate()
         return settings
@@ -80,3 +96,5 @@ class Settings:
             raise ConfigurationError("VOICE_CONNECT_RETRIES must be at least 1")
         if self.player_idle_timeout <= 0:
             raise ConfigurationError("PLAYER_IDLE_TIMEOUT must be positive")
+        if not self.tts_lang:
+            raise ConfigurationError("TTS_LANG cannot be empty")

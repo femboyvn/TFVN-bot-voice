@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from tfd_voice_bot.bot import create_bot
-from tfd_voice_bot.config import Settings
+from src.bot import create_bot
+from src.config import Settings
 
 
 class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
@@ -13,9 +13,22 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
         try:
             command_names = {command.name for command in bot.commands}
             self.assertTrue(
-                {"play", "next", "pause", "resume", "skip", "loop", "stop", "search"}
+                {
+                    "play",
+                    "next",
+                    "pause",
+                    "resume",
+                    "skip",
+                    "loop",
+                    "stop",
+                    "search",
+                    "join",
+                    "leave",
+                }
                 <= command_names
             )
+            self.assertTrue(hasattr(bot, "sessions"))
+
         finally:
             await bot.close()
 

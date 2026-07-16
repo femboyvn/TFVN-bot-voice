@@ -16,10 +16,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
 COPY --chown=bot:bot main.py ./
-COPY --chown=bot:bot tfd_voice_bot ./tfd_voice_bot
+COPY --chown=bot:bot src ./src
 
 USER bot
 
 STOPSIGNAL SIGTERM
 
-CMD ["python", "-m", "tfd_voice_bot"]
+CMD ["python", "-m", "src"]

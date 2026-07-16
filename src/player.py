@@ -10,10 +10,12 @@ from collections.abc import Awaitable, Callable
 import discord
 
 from .media import MediaService, Track
+from .tts import TextToSpeech, now_playing_speech, play_tts_on_voice_client
 
 log = logging.getLogger(__name__)
 
 IdleCallback = Callable[[int, "GuildPlayer"], Awaitable[None]]
+KeepConnected = Callable[[int], bool]
 
 
 class GuildPlayer:
@@ -28,6 +30,8 @@ class GuildPlayer:
         volume: float,
         idle_timeout: float,
         on_idle: IdleCallback,
+        tts: TextToSpeech | None = None,
+        tts_enabled: bool = True,
     ) -> None:
         self.bot = bot
         self.guild = guild
@@ -35,6 +39,8 @@ class GuildPlayer:
         self.volume = volume
         self.idle_timeout = idle_timeout
         self.on_idle = on_idle
+        self.tts = tts
+        self.tts_enabled = tts_enabled
         self.current: Track | None = None
         self.loop_current = False
         self._queue: asyncio.Queue[Track] = asyncio.Queue()
@@ -105,6 +111,9 @@ class GuildPlayer:
                 self.current = None
                 continue
 
+            # Text + spoken announcements before music; TTS failures never block the queue.
+            await self._announce_now_playing(self.current)
+
             try:
                 source = self.media.create_audio_source(self.current, volume=self.volume)
                 voice_client.play(source, after=self._after_playback)
@@ -114,8 +123,31 @@ class GuildPlayer:
                 self.current = None
                 continue
 
-            await self._send(f"Now playing: **{discord.utils.escape_markdown(self.current.title)}**")
             await self._playback_finished.wait()
+
+    async def _announce_now_playing(self, track: Track) -> None:
+        """Send text status and speak the same announcement in the voice channel."""
+        title = track.title
+        await self._send(
+            f"Now playing: **{discord.utils.escape_markdown(title)}**"
+        )
+        if not self.tts_enabled or self.tts is None:
+            return
+        await self._speak_tts(now_playing_speech(title))
+
+    async def _speak_tts(self, text: str) -> None:
+        """Play TTS audio on the guild voice client; never raise into the player loop."""
+        voice_client = self.guild.voice_client
+        if not voice_client or not voice_client.is_connected() or self.tts is None:
+            return
+        await play_tts_on_voice_client(
+            self.bot,
+            voice_client,
+            self.tts,
+            text,
+            volume=self.volume,
+            skip_if_busy=True,
+        )
 
     def _after_playback(self, error: Exception | None) -> None:
         if error:
@@ -148,11 +180,17 @@ class PlayerManager:
         *,
         volume: float,
         idle_timeout: float,
+        tts: TextToSpeech | None = None,
+        tts_enabled: bool = True,
+        keep_connected: KeepConnected | None = None,
     ) -> None:
         self.bot = bot
         self.media = media
         self.volume = volume
         self.idle_timeout = idle_timeout
+        self.tts = tts
+        self.tts_enabled = tts_enabled
+        self.keep_connected = keep_connected or (lambda _guild_id: False)
         self._players: dict[int, GuildPlayer] = {}
 
     def get(self, guild_id: int) -> GuildPlayer | None:
@@ -168,15 +206,17 @@ class PlayerManager:
                 volume=self.volume,
                 idle_timeout=self.idle_timeout,
                 on_idle=self._remove_idle,
+                tts=self.tts,
+                tts_enabled=self.tts_enabled,
             )
             self._players[guild.id] = player
         return player
 
-    async def remove(self, guild_id: int) -> bool:
+    async def remove(self, guild_id: int, *, disconnect: bool = True) -> bool:
         player = self._players.pop(guild_id, None)
         if player is None:
             return False
-        await player.close()
+        await player.close(disconnect=disconnect)
         return True
 
     async def close_all(self) -> None:
@@ -191,6 +231,10 @@ class PlayerManager:
         if self._players.get(guild_id) is not player:
             return
         self._players.pop(guild_id, None)
+        # Active voice-chat sessions stay connected after the music queue idles out.
+        # Do not cancel the player task here — it is mid-return from the idle wait.
+        if self.keep_connected(guild_id):
+            return
         voice_client = player.guild.voice_client
         if voice_client and voice_client.is_connected():
             await voice_client.disconnect(force=True)

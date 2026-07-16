@@ -1,7 +1,9 @@
 # TFD Voice Bot
 
 A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports URL playback,
-YouTube search, per-server queues, pause/resume, skip, and current-track looping.
+YouTube search, per-server queues, pause/resume, skip, current-track looping, TTS
+"now playing" announcements, and **voice-chat sessions** that join a VC and read that
+channel's text chat aloud (via gTTS).
 
 ## Requirements
 
@@ -16,7 +18,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
-python -m tfd_voice_bot
+python -m src
 ```
 
 Set `DISCORD_TOKEN` in `.env` before starting the bot. Never commit that file.
@@ -27,36 +29,56 @@ The default prefix is `!tfd `, including the trailing space.
 
 | Command | Description |
 | --- | --- |
+| `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
+| `!tfd leave` | End the chat session and leave voice |
 | `!tfd play <URL or query>` | Join voice and queue a track |
 | `!tfd next <URL or query>` | Add another track to the queue |
 | `!tfd pause` | Pause playback |
 | `!tfd resume` | Resume playback |
 | `!tfd skip` | Skip the current track |
 | `!tfd loop` | Toggle looping for the current track |
-| `!tfd stop` | Clear the queue and leave voice |
+| `!tfd stop` | Stop music, end session, and leave voice |
 | `!tfd search <query>` | Show five YouTube search results |
+
+### Voice-chat session (join + monitor)
+
+1. Join a voice channel yourself.
+2. Run `!tfd join` (in any text channel, or in the VC chat).
+3. Type in that **voice channel's text chat** — the bot speaks  
+   `"{display name} says {message}"` into the call.
+4. Bot commands (`!tfd …`) are not read aloud.
+5. `!tfd leave` or `!tfd stop` ends monitoring and disconnects.
+
+While a session is active, the bot stays in the VC even after the music queue goes idle.
+Chat TTS requires `TTS_ENABLED=true` (default) and network access for gTTS.
 
 ## Project layout
 
 ```text
-tfd_voice_bot/
+src/
   app.py          # process bootstrap and logging
   bot.py          # Discord client lifecycle
   config.py       # validated environment settings
   logging.py      # console logging configuration
   media.py        # yt-dlp and FFmpeg integration
   player.py       # per-guild queues and playback workers
+  session.py      # join-session: monitor VC text chat via TTS
+  tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
   cogs/music.py   # user-facing commands
 tests/            # fast unit and construction tests
 ```
+
+When a track starts, the bot still posts **Now playing** in the text channel and also
+speaks that announcement in the connected voice channel. TTS failures fall back to
+text-only and do not stall the music queue. Disable with `TTS_ENABLED=false`.
 
 `main.py` remains as a compatibility entry point, so `python main.py` also works.
 
 ## Verification
 
 ```powershell
-python -m compileall -q main.py tfd_voice_bot tests
+python -m compileall -q main.py src tests
 python -m unittest discover -v
 ```
 

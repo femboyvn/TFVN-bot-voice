@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from tfd_voice_bot.config import ConfigurationError, Settings
+from src.config import ConfigurationError, Settings
 
 
 class SettingsTests(unittest.TestCase):
@@ -12,6 +12,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.command_prefix, "!tfd ")
         self.assertEqual(settings.default_volume, 0.7)
         self.assertEqual(settings.voice_connect_retries, 3)
+        self.assertTrue(settings.tts_enabled)
+        self.assertEqual(settings.tts_lang, "en")
         self.assertNotIn("secret", repr(settings))
 
     def test_loads_overrides(self) -> None:
@@ -23,6 +25,8 @@ class SettingsTests(unittest.TestCase):
                 "VOICE_CONNECT_TIMEOUT": "10",
                 "VOICE_CONNECT_RETRIES": "5",
                 "PLAYER_IDLE_TIMEOUT": "60",
+                "TTS_ENABLED": "false",
+                "TTS_LANG": "vi",
             }
         )
 
@@ -31,6 +35,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.voice_connect_timeout, 10.0)
         self.assertEqual(settings.voice_connect_retries, 5)
         self.assertEqual(settings.player_idle_timeout, 60.0)
+        self.assertFalse(settings.tts_enabled)
+        self.assertEqual(settings.tts_lang, "vi")
 
     def test_requires_token(self) -> None:
         with self.assertRaisesRegex(ConfigurationError, "DISCORD_TOKEN"):

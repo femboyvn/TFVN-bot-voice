@@ -1,4 +1,4 @@
-"""User-facing music commands."""
+"""User-facing music and voice-session commands."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from discord.ext import commands
 from ..config import Settings
 from ..media import MediaExtractionError, MediaService, format_duration
 from ..player import PlayerManager
+from ..session import SessionManager
 from ..voice import get_or_connect_voice_client
 
 log = logging.getLogger(__name__)
@@ -23,11 +24,45 @@ class MusicCog(commands.Cog, name="Music"):
         settings: Settings,
         media: MediaService,
         players: PlayerManager,
+        sessions: SessionManager,
     ) -> None:
         self.bot = bot
         self.settings = settings
         self.media = media
         self.players = players
+        self.sessions = sessions
+
+    @commands.command()
+    @commands.guild_only()
+    async def join(self, ctx: commands.Context[Any]) -> None:
+        """Join your voice channel and monitor that channel's text chat via TTS."""
+        voice_client = await get_or_connect_voice_client(ctx, self.settings)
+        if voice_client is None:
+            return
+
+        channel = voice_client.channel
+        if channel is None:
+            await ctx.send("Connected, but no voice channel is bound.")
+            return
+
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            await ctx.send("Could not start a session on that channel type.")
+            return
+
+        already = self.sessions.is_active(ctx.guild.id)
+        session = self.sessions.start(ctx.guild, channel)
+        action = "Already in session" if already else "Joined"
+        await ctx.send(
+            f"{action}: monitoring **{discord.utils.escape_markdown(session.voice_channel_name)}** "
+            "text chat. Messages there are spoken with TTS. Use "
+            f"`{ctx.prefix}leave` to stop."
+        )
+
+    @commands.command()
+    @commands.guild_only()
+    async def leave(self, ctx: commands.Context[Any]) -> None:
+        """End the voice-chat session, stop music, and disconnect."""
+        await self._leave_voice(ctx, stopped_music=False)
 
     @commands.command()
     @commands.guild_only()
@@ -83,16 +118,8 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command()
     @commands.guild_only()
     async def stop(self, ctx: commands.Context[Any]) -> None:
-        if await self.players.remove(ctx.guild.id):
-            await ctx.send("Stopped and left the voice channel.")
-            return
-
-        voice_client = ctx.voice_client
-        if voice_client and voice_client.is_connected():
-            await voice_client.disconnect(force=True)
-            await ctx.send("Left the voice channel.")
-            return
-        await ctx.send("The bot is not connected to voice.")
+        """Stop music, end any chat session, and leave the voice channel."""
+        await self._leave_voice(ctx, stopped_music=True)
 
     @commands.command(name="search")
     async def youtube_search(self, ctx: commands.Context[Any], *, query: str) -> None:
@@ -116,6 +143,30 @@ class MusicCog(commands.Cog, name="Music"):
             lines.append(f"{index}. [{title}](<{entry.url}>){suffix}")
         await ctx.send("\n".join(lines))
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        """Speak voice-channel text chat while a join session is active."""
+        if message.guild is None or message.author.bot:
+            return
+        if not self.settings.tts_enabled:
+            return
+
+        session = self.sessions.get(message.guild.id)
+        if session is None or not session.active:
+            return
+
+        # Prefer clean_content so mentions are readable speech.
+        content = message.clean_content or message.content or ""
+        author = getattr(message.author, "display_name", None) or str(message.author)
+        session.offer_chat_message(
+            author_is_bot=bool(message.author.bot),
+            author_name=author,
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            content=content,
+            command_prefix=self.settings.command_prefix,
+        )
+
     async def _enqueue(
         self,
         ctx: commands.Context[Any],
@@ -137,6 +188,31 @@ class MusicCog(commands.Cog, name="Music"):
         position = await player.enqueue(track, ctx.channel)
         title = discord.utils.escape_markdown(track.title)
         await ctx.send(f"{confirmation}: **{title}** (queue position {position})")
+
+    async def _leave_voice(
+        self,
+        ctx: commands.Context[Any],
+        *,
+        stopped_music: bool,
+    ) -> None:
+        had_player = await self.players.remove(ctx.guild.id, disconnect=False)
+        had_session = await self.sessions.stop(ctx.guild.id)
+
+        voice_client = ctx.voice_client
+        disconnected = False
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect(force=True)
+            disconnected = True
+
+        if had_player or had_session or disconnected:
+            if stopped_music and (had_player or had_session):
+                await ctx.send("Stopped, ended chat session, and left the voice channel.")
+            elif had_session:
+                await ctx.send("Left the voice channel and stopped monitoring chat.")
+            else:
+                await ctx.send("Left the voice channel.")
+            return
+        await ctx.send("The bot is not connected to voice.")
 
     async def cog_command_error(
         self,
