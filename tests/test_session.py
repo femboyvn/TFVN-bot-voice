@@ -54,6 +54,16 @@ class PrepareSpeechTests(unittest.TestCase):
             "Alex nói xin chào",
         )
 
+    def test_omits_name_when_announce_disabled(self) -> None:
+        self.assertEqual(
+            prepare_chat_speech(
+                "xin chào",
+                author_name="Alex",
+                announce_name=False,
+            ),
+            "xin chào",
+        )
+
     def test_truncates_long_content_at_word_boundary(self) -> None:
         speech = prepare_chat_speech(
             "hello world and more words here",
@@ -165,6 +175,7 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager.is_active(42))
         self.assertTrue(manager.keep_connected(42))
         self.assertEqual(session.voice_channel_id, 7)
+        self.assertTrue(session.name_announce)
 
         channel2 = Mock()
         channel2.id = 8
@@ -176,6 +187,36 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.stop(42))
         self.assertFalse(manager.is_active(42))
         self.assertFalse(await manager.stop(42))
+
+    async def test_name_announce_toggle_defaults_on(self) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        tts = TextToSpeech(synthesizer=lambda t, p: p.write_bytes(b"x" * 8))
+        manager = SessionManager(bot, tts, volume=0.7)
+        guild = Mock()
+        guild.id = 5
+        channel = Mock()
+        channel.id = 1
+        channel.name = "VC"
+        session = manager.start(guild, channel)
+        try:
+            self.assertTrue(session.name_announce)
+            self.assertFalse(session.set_name_announce(False))
+            self.assertFalse(session.name_announce)
+            self.assertTrue(session.set_name_announce(True))
+            # offer_chat_message respects the flag
+            session.set_name_announce(False)
+            ok = session.offer_chat_message(
+                author_is_bot=False,
+                author_name="Sam",
+                guild_id=5,
+                channel_id=1,
+                content="only body",
+                command_prefix="!tfd ",
+            )
+            self.assertTrue(ok)
+        finally:
+            await manager.stop(5)
 
 
 if __name__ == "__main__":

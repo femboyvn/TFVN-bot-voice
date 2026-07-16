@@ -36,6 +36,7 @@ The default prefix is `!tfd `, including the trailing space.
 | --- | --- |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | End the chat session and leave voice |
+| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **on** for new sessions) |
 | `!tfd play <URL or query>` | Join voice and queue a track |
 | `!tfd next <URL or query>` | Add another track to the queue |
 | `!tfd pause` | Pause playback |
@@ -50,10 +51,11 @@ The default prefix is `!tfd `, including the trailing space.
 1. Join a voice channel yourself.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
 3. Type in that **voice channel's text chat** — the bot speaks a Vietnamese line like  
-   `"{display name} nói {message}"`.
-4. Bot commands (`!tfd …`) are not read aloud.
-5. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
-6. `!tfd leave` ends monitoring and disconnects.
+   `"{display name} nói {message}"` (name prefix is on by default).
+4. `!tfd nameannounce off` reads only the message body; `on` restores the name prefix.
+5. Bot commands (`!tfd …`) are not read aloud.
+6. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
+7. `!tfd leave` ends monitoring and disconnects.
 
 While a session is active, the bot stays in the VC even after the music queue goes idle.
 Chat TTS requires `TTS_ENABLED=true` (default) and network access for gTTS.

@@ -67,6 +67,23 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("theo dõi", sent.lower())
 
+    async def test_nameannounce_requires_active_session(self) -> None:
+        self.sessions.get.return_value = None
+        await self.cog.name_announce.callback(self.cog, self.ctx, "on")
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("join", sent)
+
+    async def test_nameannounce_toggles_session_flag(self) -> None:
+        session = Mock()
+        session.active = True
+        session.set_name_announce = Mock(return_value=False)
+        self.sessions.get.return_value = session
+
+        await self.cog.name_announce.callback(self.cog, self.ctx, "off")
+        session.set_name_announce.assert_called_once_with(False)
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("tắt", sent.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

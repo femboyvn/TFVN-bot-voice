@@ -67,6 +67,46 @@ class MusicCog(commands.Cog, name="Music"):
         """End the voice-chat session, stop music, and disconnect."""
         await self._leave_voice(ctx)
 
+    @commands.command(name="nameannounce")
+    @commands.guild_only()
+    async def name_announce(self, ctx: commands.Context[Any], mode: str) -> None:
+        """Turn speaker-name TTS prefix on or off for the current session.
+
+        Usage: ``!tfd nameannounce on`` / ``!tfd nameannounce off``
+        Default for a new session is on (``"{name} nói {message}"``).
+        """
+        session = self.sessions.get(ctx.guild.id)
+        if session is None or not session.active:
+            await ctx.send(
+                "Chưa có phiên chat TTS. Dùng "
+                f"`{ctx.prefix}join` trước."
+            )
+            return
+
+        normalized = mode.strip().lower()
+        if normalized in {"on", "true", "1", "yes", "enable", "enabled"}:
+            enabled = True
+        elif normalized in {"off", "false", "0", "no", "disable", "disabled"}:
+            enabled = False
+        else:
+            await ctx.send(
+                f"Dùng `{ctx.prefix}nameannounce on` hoặc "
+                f"`{ctx.prefix}nameannounce off`."
+            )
+            return
+
+        session.set_name_announce(enabled)
+        if enabled:
+            await ctx.send(
+                "Đã bật đọc tên người gửi "
+                f"(`Tên nói …`). Dùng `{ctx.prefix}nameannounce off` để tắt."
+            )
+        else:
+            await ctx.send(
+                "Đã tắt đọc tên người gửi (chỉ đọc nội dung tin nhắn). "
+                f"Dùng `{ctx.prefix}nameannounce on` để bật lại."
+            )
+
     @commands.command()
     @commands.guild_only()
     async def play(self, ctx: commands.Context[Any], *, query: str) -> None:

@@ -69,14 +69,22 @@ def prepare_chat_speech(
     *,
     author_name: str,
     max_chars: int = DEFAULT_MAX_SPEECH_CHARS,
+    announce_name: bool = True,
 ) -> str | None:
-    """Build a plain-speech line for a VC chat message, or None if empty."""
+    """Build a plain-speech line for a VC chat message, or None if empty.
+
+    When *announce_name* is True (session default), speaks
+    ``"{name} nói {message}"``. When False, speaks only the message body.
+    """
     cleaned = content.strip()
     if not cleaned:
         return None
-    # Vietnamese customer-facing speech template.
-    name = (author_name or "Ai đó").strip() or "Ai đó"
-    prefix = f"{name} nói "
+    if announce_name:
+        # Vietnamese customer-facing speech template.
+        name = (author_name or "Ai đó").strip() or "Ai đó"
+        prefix = f"{name} nói "
+    else:
+        prefix = ""
     # Reserve room for the speaker prefix so the body is not over-truncated.
     body_budget = max(1, max_chars - len(prefix))
     if len(cleaned) > body_budget:
@@ -147,6 +155,8 @@ class VoiceSession:
         self.get_player = get_player or (lambda _gid: None)
         self.max_speech_chars = max_speech_chars
         self.tts_chunk_chars = tts_chunk_chars
+        # Default on for every new session: speak "{name} nói …".
+        self.name_announce = True
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=queue_max)
         self._closed = False
         self._task = asyncio.create_task(
@@ -157,6 +167,11 @@ class VoiceSession:
     @property
     def active(self) -> bool:
         return not self._closed
+
+    def set_name_announce(self, enabled: bool) -> bool:
+        """Enable or disable speaker-name prefix in TTS. Returns the new value."""
+        self.name_announce = bool(enabled)
+        return self.name_announce
 
     def rebind_channel(
         self,
@@ -210,6 +225,7 @@ class VoiceSession:
             content,
             author_name=author_name,
             max_chars=self.max_speech_chars,
+            announce_name=self.name_announce,
         )
         if speech is None:
             return False

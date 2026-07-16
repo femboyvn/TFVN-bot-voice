@@ -24,6 +24,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
                     "search",
                     "join",
                     "leave",
+                    "nameannounce",
                 }
                 <= command_names
             )
