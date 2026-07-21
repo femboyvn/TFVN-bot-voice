@@ -12,6 +12,7 @@ from src.session import (
     chunk_speech_text,
     is_session_chat_message,
     prepare_chat_speech,
+    sanitize_for_speech,
 )
 from src.tts import TextToSpeech
 
@@ -87,6 +88,49 @@ class PrepareSpeechTests(unittest.TestCase):
 
     def test_empty_returns_none(self) -> None:
         self.assertIsNone(prepare_chat_speech("  ", author_name="A"))
+
+    def test_skips_url_only_and_gif_links(self) -> None:
+        self.assertIsNone(
+            prepare_chat_speech(
+                "https://tenor.com/view/funny-gif-123",
+                author_name="Alex",
+            )
+        )
+        self.assertIsNone(
+            prepare_chat_speech(
+                "http://media.giphy.com/media/abc/giphy.gif",
+                author_name="Alex",
+            )
+        )
+
+    def test_strips_url_but_keeps_surrounding_text(self) -> None:
+        speech = prepare_chat_speech(
+            "xem này https://example.com/a.gif nhé",
+            author_name="Lan",
+            announce_name=False,
+        )
+        self.assertEqual(speech, "xem này nhé")
+        self.assertNotIn("http", speech or "")
+
+    def test_skips_emoji_and_icon_only(self) -> None:
+        self.assertIsNone(
+            prepare_chat_speech("<:wave:123456789012345678>", author_name="A")
+        )
+        self.assertIsNone(prepare_chat_speech(":smile: :thumbsup:", author_name="A"))
+        self.assertIsNone(prepare_chat_speech("😂🔥", author_name="A"))
+
+
+class SanitizeSpeechTests(unittest.TestCase):
+    def test_removes_discord_cdn_and_www(self) -> None:
+        text = sanitize_for_speech(
+            "hi www.example.com/x.gif and "
+            "https://cdn.discordapp.com/emojis/1.png rest"
+        )
+        self.assertEqual(text, "hi and rest")
+
+    def test_removes_custom_and_unicode_emoji(self) -> None:
+        text = sanitize_for_speech("hello <a:dance:99> 😀 there")
+        self.assertEqual(text, "hello there")
 
 
 class ChunkSpeechTests(unittest.TestCase):

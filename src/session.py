@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Callable
 
 import discord
@@ -25,6 +26,36 @@ _BUSY_WAIT_SECONDS = 90.0
 _BUSY_POLL = 0.25
 
 PlayerLookup = Callable[[int], GuildPlayer | None]
+
+# Strip media / link / icon noise so TTS does not read "https colon slash slash…".
+_URL_RE = re.compile(
+    r"(?i)\b(?:https?://|www\.)[^\s<>\[\]()\"']+",
+)
+# Discord custom emoji: <:name:id> / <a:name:id>
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+# :shortcode: left after clean_content converts custom emoji
+_EMOJI_SHORTCODE_RE = re.compile(r":[a-zA-Z0-9_~+-]{1,64}:")
+# Common standalone unicode emoji / symbols (icons) — skip for speech.
+_UNICODE_EMOJI_RE = re.compile(
+    "["
+    "\U0001F1E0-\U0001F1FF"  # flags
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200D"  # ZWJ
+    "]+",
+    flags=re.UNICODE,
+)
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def is_session_chat_message(
@@ -64,6 +95,20 @@ def _truncate_at_word(text: str, max_chars: int) -> str:
     return snippet + "…"
 
 
+def sanitize_for_speech(content: str) -> str:
+    """Remove URLs, GIFs/links, and emoji/icons so TTS only speaks real words.
+
+    Returns stripped text; may be empty when the message was only media/icons.
+    """
+    text = content or ""
+    text = _CUSTOM_EMOJI_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    text = _EMOJI_SHORTCODE_RE.sub(" ", text)
+    text = _UNICODE_EMOJI_RE.sub(" ", text)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    return text
+
+
 def prepare_chat_speech(
     content: str,
     *,
@@ -75,8 +120,9 @@ def prepare_chat_speech(
 
     When *announce_name* is True (session default), speaks
     ``"{name} nói {message}"``. When False, speaks only the message body.
+    Skips pure link / GIF / emoji messages after sanitization.
     """
-    cleaned = content.strip()
+    cleaned = sanitize_for_speech(content)
     if not cleaned:
         return None
     if announce_name:
