@@ -6,6 +6,9 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import Enum, auto
+from functools import partial
 from pathlib import Path
 
 import discord
@@ -24,6 +27,21 @@ log = logging.getLogger(__name__)
 
 IdleCallback = Callable[[int, "GuildPlayer"], Awaitable[None]]
 KeepConnected = Callable[[int], bool]
+
+
+class JumpResult(Enum):
+    """Result of asking a guild player to jump within its current track."""
+
+    SUCCESS = auto()
+    NOT_PLAYING = auto()
+    OUT_OF_RANGE = auto()
+    UNKNOWN_DURATION = auto()
+
+
+@dataclass(slots=True)
+class _JumpRequest:
+    offset: int
+    paused: bool
 
 
 class GuildPlayer:
@@ -54,10 +72,12 @@ class GuildPlayer:
         self.current: Track | None = None
         self.loop_current = False
         self._queue: asyncio.Queue[Track] = asyncio.Queue()
-        self._playback_finished = asyncio.Event()
         self._announce_channel: discord.abc.Messageable | None = None
         self._closed = False
         self._mixer: DuckingAudioSource | None = None
+        self._music_active = False
+        self._pending_jump: _JumpRequest | None = None
+        self._skip_requested = False
         self._task = asyncio.create_task(
             self._player_loop(),
             name=f"guild-player-{guild.id}",
@@ -77,12 +97,57 @@ class GuildPlayer:
         return self.loop_current
 
     def skip(self) -> bool:
+        if self._pending_jump is not None:
+            self._pending_jump = None
+            self._skip_requested = True
+            self.loop_current = False
+            return True
+
         voice_client = self.guild.voice_client
-        if not voice_client or not (voice_client.is_playing() or voice_client.is_paused()):
+        if (
+            self._skip_requested
+            or not self._music_active
+            or not voice_client
+            or not (voice_client.is_playing() or voice_client.is_paused())
+        ):
             return False
+
+        self._skip_requested = True
         self.loop_current = False
         voice_client.stop()
         return True
+
+    def jump(self, offset: int) -> JumpResult:
+        """Request a restart of the current track at ``offset`` seconds."""
+        if self._closed or self.current is None:
+            return JumpResult.NOT_PLAYING
+        if offset < 0:
+            return JumpResult.OUT_OF_RANGE
+        if self.current.duration is None:
+            return JumpResult.UNKNOWN_DURATION
+        if offset >= self.current.duration:
+            return JumpResult.OUT_OF_RANGE
+        if self._skip_requested:
+            return JumpResult.NOT_PLAYING
+
+        if self._pending_jump is not None:
+            self._pending_jump.offset = offset
+            return JumpResult.SUCCESS
+
+        voice_client = self.guild.voice_client
+        if (
+            not self._music_active
+            or not voice_client
+            or not (voice_client.is_playing() or voice_client.is_paused())
+        ):
+            return JumpResult.NOT_PLAYING
+
+        self._pending_jump = _JumpRequest(
+            offset=offset,
+            paused=voice_client.is_paused(),
+        )
+        voice_client.stop()
+        return JumpResult.SUCCESS
 
     async def close(self, *, disconnect: bool = True) -> None:
         if self._closed:
@@ -90,6 +155,9 @@ class GuildPlayer:
         self._closed = True
         self.loop_current = False
         self.current = None
+        self._pending_jump = None
+        self._skip_requested = False
+        self._music_active = False
         self._drain_queue()
 
         voice_client = self.guild.voice_client
@@ -104,10 +172,10 @@ class GuildPlayer:
             await voice_client.disconnect(force=True)
 
     async def _player_loop(self) -> None:
-        while not self._closed:
-            self._playback_finished.clear()
+        jump_request: _JumpRequest | None = None
 
-            if self.current is None or not self.loop_current:
+        while not self._closed:
+            if self.current is None:
                 try:
                     self.current = await asyncio.wait_for(
                         self._queue.get(),
@@ -120,33 +188,71 @@ class GuildPlayer:
             voice_client = self.guild.voice_client
             if not voice_client or not voice_client.is_connected():
                 self.current = None
+                jump_request = None
                 continue
 
-            # Text + spoken announcements before music; TTS failures never block the queue.
-            # Status strings are Vietnamese (customer UI).
-            await self._announce_now_playing(self.current)
+            if jump_request is None:
+                # TTS failures never block the queue. Status strings are Vietnamese.
+                await self._announce_now_playing(self.current)
 
+            playback_finished = asyncio.Event()
             try:
-                source = self.media.create_audio_source(self.current, volume=self.volume)
+                if jump_request is None:
+                    source = self.media.create_audio_source(
+                        self.current,
+                        volume=self.volume,
+                    )
+                else:
+                    source = self.media.create_audio_source(
+                        self.current,
+                        volume=self.volume,
+                        start_at=jump_request.offset,
+                    )
                 mixer = DuckingAudioSource(source, duck_level=self.duck_level)
                 self._mixer = mixer
-                voice_client.play(mixer, after=self._after_playback)
+                self._music_active = True
+                voice_client.play(
+                    mixer,
+                    after=partial(self._after_playback, playback_finished),
+                )
+                if jump_request is not None and jump_request.paused:
+                    voice_client.pause()
             except Exception:
                 self._mixer = None
+                self._music_active = False
+                self._pending_jump = None
+                self._skip_requested = False
                 log.exception("Could not start playback in guild %s", self.guild.id)
                 await self._send("Không thể phát bài trong hàng đợi.")
                 self.current = None
+                jump_request = None
                 continue
 
-            await self._playback_finished.wait()
+            await playback_finished.wait()
             self._mixer = None
+            self._music_active = False
+
+            if self._closed:
+                return
+            if self._skip_requested:
+                self._skip_requested = False
+                self._pending_jump = None
+                self.current = None
+                jump_request = None
+                continue
+            if self._pending_jump is not None:
+                jump_request = self._pending_jump
+                self._pending_jump = None
+                continue
+
+            jump_request = None
+            if not self.loop_current:
+                self.current = None
 
     async def _announce_now_playing(self, track: Track) -> None:
         """Send text status and speak the same announcement in the voice channel."""
         title = track.title
-        await self._send(
-            f"Đang phát: **{discord.utils.escape_markdown(title)}**"
-        )
+        await self._send(f"Đang phát: **{discord.utils.escape_markdown(title)}**")
         if not self.tts_enabled or self.tts is None:
             return
         await self._speak_tts(now_playing_speech(title))
@@ -193,9 +299,18 @@ class GuildPlayer:
             return False
 
         # Keep volume transformer on TTS; mixer only ducks the music (primary).
-        done = mixer.inject_secondary(source)
         play_timeout = tts_playback_timeout(text)
         try:
+            if (
+                self._mixer is not mixer
+                or not self._music_active
+                or not voice_client.is_connected()
+                or not voice_client.is_playing()
+            ):
+                source.cleanup()
+                return False
+
+            done = mixer.inject_secondary(source)
             await asyncio.wait_for(
                 asyncio.to_thread(done.wait),
                 timeout=play_timeout,
@@ -216,11 +331,15 @@ class GuildPlayer:
                 with contextlib.suppress(OSError):
                     audio_path.unlink(missing_ok=True)
 
-    def _after_playback(self, error: Exception | None) -> None:
+    def _after_playback(
+        self,
+        playback_finished: asyncio.Event,
+        error: Exception | None,
+    ) -> None:
         if error:
             log.error("Playback failed in guild %s: %s", self.guild.id, error)
-        self._mixer = None
-        self.bot.loop.call_soon_threadsafe(self._playback_finished.set)
+        with contextlib.suppress(RuntimeError):
+            self.bot.loop.call_soon_threadsafe(playback_finished.set)
 
     async def _send(self, message: str) -> None:
         if self._announce_channel is None:

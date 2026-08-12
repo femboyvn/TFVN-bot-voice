@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +35,10 @@ FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
     "options": "-vn",
 }
+
+JUMP_TIMESTAMP_PATTERN = re.compile(
+    r"(?P<hours>[0-9]{2}):(?P<minutes>[0-5][0-9]):(?P<seconds>[0-5][0-9])"
+)
 
 
 class MediaExtractionError(RuntimeError):
@@ -105,8 +110,18 @@ class MediaService:
         track: Track,
         *,
         volume: float,
+        start_at: int | None = None,
     ) -> discord.PCMVolumeTransformer:
-        source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
+        if start_at is not None and start_at < 0:
+            raise ValueError("start_at cannot be negative")
+
+        ffmpeg_options = dict(FFMPEG_OPTIONS)
+        if start_at:
+            ffmpeg_options["before_options"] = (
+                f"{ffmpeg_options['before_options']} -ss {start_at}"
+            )
+
+        source = discord.FFmpegPCMAudio(track.stream_url, **ffmpeg_options)
         return discord.PCMVolumeTransformer(source, volume=volume)
 
     @staticmethod
@@ -128,6 +143,18 @@ def format_duration(duration: int | None) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+
+def parse_jump_timestamp(value: str) -> int | None:
+    """Parse a strict ``HH:MM:SS`` jump target into whole seconds."""
+    match = JUMP_TIMESTAMP_PATTERN.fullmatch(value)
+    if match is None:
+        return None
+
+    hours = int(match.group("hours"))
+    minutes = int(match.group("minutes"))
+    seconds = int(match.group("seconds"))
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def _duration_as_int(value: object) -> int | None:

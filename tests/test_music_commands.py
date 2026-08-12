@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 from src.cogs.music import MusicCog
+from src.player import JumpResult
 
 
 class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +84,49 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         session.set_name_announce.assert_called_once_with(False)
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("tắt", sent.lower())
+
+    async def test_jump_converts_timestamp_and_restarts_current_track(self) -> None:
+        player = Mock()
+        player.jump.return_value = JumpResult.SUCCESS
+        self.players.get = Mock(return_value=player)
+
+        await self.cog.jump.callback(self.cog, self.ctx, "01:02:03")
+
+        self.players.get.assert_called_once_with(1)
+        player.jump.assert_called_once_with(3723)
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("1:02:03", sent)
+
+    async def test_jump_rejects_invalid_timestamp(self) -> None:
+        self.players.get = Mock()
+
+        await self.cog.jump.callback(self.cog, self.ctx, "01:60:00")
+
+        self.players.get.assert_not_called()
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("HH:MM:SS", sent)
+
+    async def test_jump_reports_timestamp_outside_current_track(self) -> None:
+        player = Mock()
+        self.players.get = Mock(return_value=player)
+
+        for result in (JumpResult.OUT_OF_RANGE, JumpResult.UNKNOWN_DURATION):
+            with self.subTest(result=result):
+                self.ctx.send.reset_mock()
+                player.jump.return_value = result
+
+                await self.cog.jump.callback(self.cog, self.ctx, "01:02:03")
+
+                sent = self.ctx.send.await_args.args[0]
+                self.assertIn("không tồn tại", sent.lower())
+
+    async def test_jump_requires_current_playback(self) -> None:
+        self.players.get = Mock(return_value=None)
+
+        await self.cog.jump.callback(self.cog, self.ctx, "00:00:00")
+
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("Không có gì", sent)
 
 
 if __name__ == "__main__":

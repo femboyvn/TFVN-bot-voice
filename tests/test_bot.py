@@ -18,6 +18,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
                     "next",
                     "pause",
                     "resume",
+                    "jump",
                     "skip",
                     "loop",
                     "stop",

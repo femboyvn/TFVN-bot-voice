@@ -12,8 +12,13 @@ import discord
 from discord.ext import commands
 
 from ..config import Settings
-from ..media import MediaExtractionError, MediaService, format_duration
-from ..player import PlayerManager
+from ..media import (
+    MediaExtractionError,
+    MediaService,
+    format_duration,
+    parse_jump_timestamp,
+)
+from ..player import JumpResult, PlayerManager
 from ..session import SessionManager
 from ..voice import get_or_connect_voice_client
 
@@ -77,10 +82,7 @@ class MusicCog(commands.Cog, name="Music"):
         """
         session = self.sessions.get(ctx.guild.id)
         if session is None or not session.active:
-            await ctx.send(
-                "Chưa có phiên chat TTS. Dùng "
-                f"`{ctx.prefix}join` trước."
-            )
+            await ctx.send("Chưa có phiên chat TTS. Dùng " f"`{ctx.prefix}join` trước.")
             return
 
         normalized = mode.strip().lower()
@@ -148,6 +150,29 @@ class MusicCog(commands.Cog, name="Music"):
             return
         await ctx.send("Không có gì đang phát.")
 
+    @commands.command()
+    @commands.guild_only()
+    async def jump(self, ctx: commands.Context[Any], timestamp: str) -> None:
+        """Jump to an ``HH:MM:SS`` position in the current track."""
+        offset = parse_jump_timestamp(timestamp)
+        if offset is None:
+            await ctx.send(f"Thời gian không hợp lệ. Dùng `{ctx.prefix}jump HH:MM:SS`.")
+            return
+
+        player = self.players.get(ctx.guild.id)
+        if player is None:
+            await ctx.send("Không có gì đang phát.")
+            return
+
+        result = player.jump(offset)
+        if result is JumpResult.SUCCESS:
+            await ctx.send(f"Đã chuyển đến {format_duration(offset)}.")
+            return
+        if result in {JumpResult.OUT_OF_RANGE, JumpResult.UNKNOWN_DURATION}:
+            await ctx.send("Thời điểm đó không tồn tại trong bài hiện tại.")
+            return
+        await ctx.send("Không có gì đang phát.")
+
     @commands.command(name="loop")
     @commands.guild_only()
     async def loop_track(self, ctx: commands.Context[Any]) -> None:
@@ -156,9 +181,7 @@ class MusicCog(commands.Cog, name="Music"):
             await ctx.send("Không có gì đang phát.")
             return
         enabled = player.toggle_loop()
-        await ctx.send(
-            f"Chế độ lặp {'đã bật' if enabled else 'đã tắt'}."
-        )
+        await ctx.send(f"Chế độ lặp {'đã bật' if enabled else 'đã tắt'}.")
 
     @commands.command()
     @commands.guild_only()
@@ -260,9 +283,7 @@ class MusicCog(commands.Cog, name="Music"):
         player = self.players.get_or_create(ctx.guild)
         position = await player.enqueue(track, ctx.channel)
         title = discord.utils.escape_markdown(track.title)
-        await ctx.send(
-            f"{confirmation}: **{title}** (vị trí hàng đợi {position})"
-        )
+        await ctx.send(f"{confirmation}: **{title}** (vị trí hàng đợi {position})")
 
     async def _leave_voice(self, ctx: commands.Context[Any]) -> None:
         """Stop music, end the chat session, and disconnect from voice."""

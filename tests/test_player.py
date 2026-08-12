@@ -4,13 +4,13 @@ import asyncio
 import contextlib
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import discord
 
 from src.ducking import DuckingAudioSource
 from src.media import Track
-from src.player import GuildPlayer, PlayerManager
+from src.player import GuildPlayer, JumpResult, PlayerManager
 from src.tts import TTSError, TextToSpeech, now_playing_speech
 
 
@@ -34,6 +34,11 @@ class GuildPlayerControlTests(unittest.TestCase):
         self.player = object.__new__(GuildPlayer)
         self.player.loop_current = False
         self.player.guild = Mock()
+        self.player.current = None
+        self.player._closed = False
+        self.player._music_active = False
+        self.player._pending_jump = None
+        self.player._skip_requested = False
 
     def test_toggle_loop_changes_state(self) -> None:
         self.assertTrue(self.player.toggle_loop())
@@ -44,9 +49,11 @@ class GuildPlayerControlTests(unittest.TestCase):
         voice_client.is_playing.return_value = True
         self.player.guild.voice_client = voice_client
         self.player.loop_current = True
+        self.player._music_active = True
 
         self.assertTrue(self.player.skip())
         self.assertFalse(self.player.loop_current)
+        self.assertTrue(self.player._skip_requested)
         voice_client.stop.assert_called_once_with()
 
     def test_skip_returns_false_when_idle(self) -> None:
@@ -57,6 +64,258 @@ class GuildPlayerControlTests(unittest.TestCase):
 
         self.assertFalse(self.player.skip())
         voice_client.stop.assert_not_called()
+
+    def test_jump_stops_current_track_and_records_offset(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Long song",
+            stream_url="https://example.test/song",
+            duration=4000,
+        )
+        self.player._music_active = True
+
+        result = self.player.jump(3723)
+
+        self.assertIs(result, JumpResult.SUCCESS)
+        self.assertEqual(self.player._pending_jump.offset, 3723)
+        self.assertFalse(self.player._pending_jump.paused)
+        voice_client.stop.assert_called_once_with()
+
+    def test_latest_jump_wins_while_restart_is_pending(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Long song",
+            stream_url="https://example.test/song",
+            duration=120,
+        )
+        self.player._music_active = True
+
+        self.assertIs(self.player.jump(10), JumpResult.SUCCESS)
+        self.assertIs(self.player.jump(30), JumpResult.SUCCESS)
+
+        self.assertEqual(self.player._pending_jump.offset, 30)
+        voice_client.stop.assert_called_once_with()
+
+    def test_jump_preserves_paused_state(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = False
+        voice_client.is_paused.return_value = True
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Paused song",
+            stream_url="https://example.test/song",
+            duration=120,
+        )
+        self.player._music_active = True
+
+        self.assertIs(self.player.jump(30), JumpResult.SUCCESS)
+
+        self.assertTrue(self.player._pending_jump.paused)
+        voice_client.stop.assert_called_once_with()
+
+    def test_jump_rejects_nonexistent_offsets(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Short song",
+            stream_url="https://example.test/song",
+            duration=30,
+        )
+        self.player._music_active = True
+
+        for offset in (-1, 30, 31):
+            with self.subTest(offset=offset):
+                self.assertIs(self.player.jump(offset), JumpResult.OUT_OF_RANGE)
+
+        voice_client.stop.assert_not_called()
+
+    def test_jump_rejects_track_with_unknown_duration(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Live stream",
+            stream_url="https://example.test/live",
+        )
+        self.player._music_active = True
+
+        self.assertIs(self.player.jump(10), JumpResult.UNKNOWN_DURATION)
+        voice_client.stop.assert_not_called()
+
+    def test_jump_does_not_control_now_playing_tts(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Announced song",
+            stream_url="https://example.test/song",
+            duration=120,
+        )
+
+        self.assertIs(self.player.jump(10), JumpResult.NOT_PLAYING)
+        voice_client.stop.assert_not_called()
+
+    def test_skip_overrides_pending_jump(self) -> None:
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        self.player.current = Track(
+            title="Long song",
+            stream_url="https://example.test/song",
+            duration=120,
+        )
+        self.player._music_active = True
+        self.assertIs(self.player.jump(10), JumpResult.SUCCESS)
+
+        self.assertTrue(self.player.skip())
+
+        self.assertIsNone(self.player._pending_jump)
+        self.assertTrue(self.player._skip_requested)
+        voice_client.stop.assert_called_once_with()
+
+
+class _ControlledVoiceClient:
+    """Voice-client fake whose playback callbacks are fired by the test."""
+
+    def __init__(self) -> None:
+        self.connected = True
+        self.playing = False
+        self.paused = False
+        self.stop_calls = 0
+        self.pause_calls = 0
+        self.callbacks: list = []
+        self.sources: list[discord.AudioSource] = []
+        self.play_notifications: asyncio.Queue[None] = asyncio.Queue()
+        self._current_callback = None
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def is_playing(self) -> bool:
+        return self.playing
+
+    def is_paused(self) -> bool:
+        return self.paused
+
+    def play(self, source: discord.AudioSource, *, after=None) -> None:
+        self.sources.append(source)
+        self.callbacks.append(after)
+        self._current_callback = after
+        self.playing = True
+        self.paused = False
+        self.play_notifications.put_nowait(None)
+
+    def pause(self) -> None:
+        self.pause_calls += 1
+        self.playing = False
+        self.paused = True
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        self.finish_current()
+
+    def finish_current(self) -> None:
+        callback = self._current_callback
+        self._current_callback = None
+        self.playing = False
+        self.paused = False
+        if callback is not None:
+            callback(None)
+
+
+class GuildPlayerJumpIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_jump_restarts_same_track_without_consuming_queue(self) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        guild = Mock()
+        guild.id = 101
+        voice_client = _ControlledVoiceClient()
+        guild.voice_client = voice_client
+        media = Mock()
+        media.create_audio_source.side_effect = (
+            lambda *args, **kwargs: _FakeAudioSource()
+        )
+        idle = AsyncMock()
+        channel = AsyncMock()
+        first = Track(
+            title="First",
+            stream_url="https://example.test/first",
+            duration=120,
+        )
+        second = Track(
+            title="Second",
+            stream_url="https://example.test/second",
+            duration=180,
+        )
+        player = GuildPlayer(
+            bot,
+            guild,
+            media,
+            volume=0.5,
+            idle_timeout=0.05,
+            on_idle=idle,
+            tts=None,
+            tts_enabled=False,
+        )
+
+        try:
+            await player.enqueue(first, channel)
+            await player.enqueue(second, channel)
+            await asyncio.wait_for(
+                voice_client.play_notifications.get(),
+                timeout=1.0,
+            )
+            stale_callback = voice_client.callbacks[0]
+
+            self.assertIs(player.jump(10), JumpResult.SUCCESS)
+            self.assertIs(player.jump(30), JumpResult.SUCCESS)
+            self.assertEqual(voice_client.stop_calls, 1)
+
+            await asyncio.wait_for(
+                voice_client.play_notifications.get(),
+                timeout=1.0,
+            )
+            self.assertIs(player.current, first)
+            self.assertEqual(player._queue.qsize(), 1)
+            self.assertEqual(
+                media.create_audio_source.call_args_list[:2],
+                [
+                    call(first, volume=0.5),
+                    call(first, volume=0.5, start_at=30),
+                ],
+            )
+            self.assertEqual(channel.send.await_count, 1)
+
+            # A stale callback belongs only to its original playback generation.
+            stale_callback(None)
+            await asyncio.sleep(0)
+            self.assertEqual(len(voice_client.callbacks), 2)
+
+            voice_client.finish_current()
+            await asyncio.wait_for(
+                voice_client.play_notifications.get(),
+                timeout=1.0,
+            )
+            self.assertIs(player.current, second)
+            self.assertEqual(
+                media.create_audio_source.call_args_list[2],
+                call(second, volume=0.5),
+            )
+
+            voice_client.finish_current()
+            await asyncio.wait_for(player._task, timeout=1.0)
+            idle.assert_awaited_once()
+        finally:
+            await player.close(disconnect=False)
 
 
 class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
@@ -284,6 +543,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         player.volume = 0.7
         player.tts = TextToSpeech(synthesizer=_write_fake_mp3)
         player._mixer = mixer
+        player._music_active = True
         voice_client = MagicMock()
         voice_client.is_connected.return_value = True
         voice_client.is_playing.return_value = True

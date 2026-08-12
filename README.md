@@ -1,7 +1,7 @@
 # TFD Voice Bot
 
 A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports URL playback,
-YouTube search, per-server queues, pause/resume, skip, current-track looping, TTS
+YouTube search, per-server queues, pause/resume, timestamp jumps, skip, looping, TTS
 "now playing" announcements, and **voice-chat sessions** that join a VC and read that
 channel's text chat aloud (via gTTS).
 
@@ -41,6 +41,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd next <URL or query>` | Add another track to the queue |
 | `!tfd pause` | Pause playback |
 | `!tfd resume` | Resume playback |
+| `!tfd jump HH:MM:SS` | Jump to a timestamp in the current track |
 | `!tfd skip` | Skip the current track |
 | `!tfd loop` | Toggle looping for the current track |
 | `!tfd stop` | Stop music only (TTS session keeps running if you used `join`) |
