@@ -15,7 +15,9 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      packages: write      # ← this is the key permission
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
