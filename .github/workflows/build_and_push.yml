@@ -1,4 +1,4 @@
-# .github/workflows/docker.yml
+# .github/workflows/build_and_push.yml
 name: Build and Push Docker Image
 
 on:
@@ -6,8 +6,11 @@ on:
     branches:
       - prod  # Trigger on push to prod branch
       - op/dockered
+    tags:
+      - 'v*'  # Trigger on pushed tags like v1.0.0
   release:
-    types: [published]  # Trigger on release
+    types: [published]  # Trigger on release publish
+  workflow_dispatch:    # Allow manual runs from Actions UI
 
 jobs:
   build-and-push:
@@ -35,10 +38,11 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
+            type=ref,event=tag         # add tag names for pushed tags/releases
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix={{branch}}-
+            type=sha                   # use plain sha (avoids empty-branch prefix)
             # set latest tag for default branch
             type=raw,value=latest,enable={{is_default_branch}}
 
