@@ -1,0 +1,7 @@
+services:
+  app:
+    image: ghcr.io/femboyvn/tfvn-bot-voice:latest  
+    container_name: my-app
+    restart: unless-stopped
+    env_file:
+      - .env
