@@ -92,6 +92,33 @@ class DuckingAudioSourceTests(unittest.TestCase):
         mixer.read()
         self.assertTrue(second_done.is_set())
 
+    def test_paused_primary_is_frozen_while_secondary_keeps_playing(self) -> None:
+        primary = _ConstantSource(
+            [_frame_from_sample(1000, 2), _frame_from_sample(2000, 2), b""]
+        )
+        mixer = DuckingAudioSource(primary, duck_level=0.2)
+        mixer.pause_primary()
+
+        silence = mixer.read()
+        self.assertEqual(silence, b"\x00" * 3840)
+        self.assertEqual(len(primary._chunks), 3)
+
+        done = mixer.inject_secondary(
+            _ConstantSource([_frame_from_sample(500, 2), b""])
+        )
+        speech = mixer.read()
+        self.assertEqual(struct.unpack("<h", speech[:2])[0], 500)
+        self.assertEqual(len(primary._chunks), 3)
+
+        self.assertEqual(mixer.read(), b"\x00" * 3840)
+        self.assertTrue(done.is_set())
+        self.assertEqual(len(primary._chunks), 3)
+
+        mixer.resume_primary()
+        resumed = mixer.read()
+        self.assertEqual(struct.unpack("<h", resumed[:2])[0], 1000)
+        self.assertEqual(len(primary._chunks), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

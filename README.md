@@ -1,9 +1,10 @@
 # TFD Voice Bot
 
-A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports URL playback,
-YouTube search, per-server queues, pause/resume, timestamp jumps, skip, looping, TTS
-"now playing" announcements, and **voice-chat sessions** that join a VC and read that
-channel's text chat aloud (via gTTS).
+A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports a shared
+Discord music-control panel, URL and YouTube-playlist playback, YouTube search,
+per-server queues, pause/resume, timestamp jumps, skip, looping, TTS "now playing"
+announcements, and **voice-chat sessions** that join a VC and read that channel's text
+chat aloud (via gTTS).
 
 User-facing Discord replies and spoken TTS phrases are in **Vietnamese** (customer UI).
 Source comments, logs, and this README stay in English.
@@ -34,6 +35,7 @@ The default prefix is `!tfd `, including the trailing space.
 
 | Command | Description |
 | --- | --- |
+| `!tfd music` | Join your VC and open its shared interactive music panel |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | End the chat session and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **on** for new sessions) |
@@ -46,6 +48,28 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd loop` | Toggle looping for the current track |
 | `!tfd stop` | Stop music only (TTS session keeps running if you used `join`) |
 | `!tfd search <query>` | Show five YouTube search results |
+
+### Shared music panel
+
+1. Join a voice channel and run `!tfd music`.
+2. Use **Thêm nhạc** to enter a search phrase, media URL, or YouTube playlist URL.
+   Search phrases show five private results; selecting one appends it to the queue.
+3. A playlist appends its available videos in order, inspecting at most the first 25
+   entries per request. Unavailable entries are skipped.
+4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
+   timestamp jump, queue view, clear queue, and stop. Members outside that channel,
+   including administrators, cannot control playback or move the bot.
+5. The public panel shows the current track and the next five queued tracks. Search
+   results, queue pages, confirmations, and errors are visible only to the requester.
+
+Only one panel is active per Discord server during the current process. Opening a new
+panel disables the old one.
+After a bot restart, run `!tfd music` again. **Xóa hàng đợi** removes waiting tracks
+but leaves the current track playing; **Dừng** stops the current track and clears the queue.
+
+All voice and playback commands use the same room rule as the panel. If the bot is
+already connected to another voice channel, it stays there and tells the caller to join
+that channel instead.
 
 ### Voice-chat session (join + monitor)
 

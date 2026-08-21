@@ -59,6 +59,9 @@ class VoiceBot(commands.Bot):
         log.info("Bot ready as %s (guilds: %s)", self.user, len(self.guilds))
 
     async def close(self) -> None:
+        music_cog = self.get_cog("Music")
+        if isinstance(music_cog, MusicCog):
+            await music_cog.close()
         await self.players.close_all()
         await self.sessions.close_all()
         await super().close()

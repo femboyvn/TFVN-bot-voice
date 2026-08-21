@@ -85,11 +85,32 @@ class DuckingAudioSource(discord.AudioSource):
         self._secondary: discord.AudioSource | None = None
         self._secondary_done: threading.Event | None = None
         self._primary_ended = False
+        self._primary_paused = False
 
     @property
     def is_ducking(self) -> bool:
         with self._lock:
             return self._secondary is not None
+
+    @property
+    def is_primary_paused(self) -> bool:
+        """Whether music reads are frozen while the mixer remains active."""
+        with self._lock:
+            return self._primary_paused
+
+    def pause_primary(self) -> None:
+        """Freeze music without pausing the Discord audio player.
+
+        The mixer continues producing silence (or secondary TTS audio), so a
+        voice-session announcement can still be injected while music is paused.
+        """
+        with self._lock:
+            self._primary_paused = True
+
+    def resume_primary(self) -> None:
+        """Resume music reads after :meth:`pause_primary`."""
+        with self._lock:
+            self._primary_paused = False
 
     def inject_secondary(self, source: discord.AudioSource) -> threading.Event:
         """Start mixing *source* over the primary; music is ducked until it ends.
@@ -126,9 +147,10 @@ class DuckingAudioSource(discord.AudioSource):
             secondary = self._secondary
             duck = self.duck_level if secondary is not None else 1.0
             done_event = self._secondary_done
+            primary_paused = self._primary_paused
 
         primary_data = b""
-        if not self._primary_ended:
+        if not self._primary_ended and not primary_paused:
             try:
                 primary_data = self.primary.read()
             except Exception:
@@ -153,6 +175,10 @@ class DuckingAudioSource(discord.AudioSource):
                     done_event.set()
                 secondary = None
 
+        if primary_paused and not self._primary_ended and not secondary_data:
+            # Returning b"" ends discord.py playback. Emit one silent frame so
+            # secondary audio can still be injected while music stays frozen.
+            return b"\x00" * PCM_FRAME_SIZE
         if not primary_data and not secondary_data:
             return b""
         if secondary is None or not secondary_data:

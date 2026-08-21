@@ -14,6 +14,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
             command_names = {command.name for command in bot.commands}
             self.assertTrue(
                 {
+                    "music",
                     "play",
                     "next",
                     "pause",
