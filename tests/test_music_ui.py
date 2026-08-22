@@ -34,6 +34,9 @@ def _snapshot(
 class _Actions:
     def __init__(self, snapshot: PlayerSnapshot | None = None) -> None:
         self.current_snapshot = snapshot
+        self.tts_available = True
+        self.title_reading = True
+        self.chat_reading = False
         self.ui_ensure_panel_access = AsyncMock(return_value=True)
         self.ui_add_input = AsyncMock(return_value=AddInputResult(message="Đã thêm."))
         self.ui_enqueue_search_result = AsyncMock(return_value="Đã thêm.")
@@ -44,9 +47,24 @@ class _Actions:
         self.ui_jump = AsyncMock(return_value="Đã tua.")
         self.ui_clear_queue = AsyncMock(return_value="Đã xóa.")
         self.ui_stop = AsyncMock(return_value="Đã dừng.")
+        self.ui_toggle_title_reading = AsyncMock(
+            return_value="Đã tắt đọc tên bài."
+        )
+        self.ui_toggle_chat_reading = AsyncMock(
+            return_value="Đã bật đọc tin nhắn."
+        )
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None:
         return self.current_snapshot
+
+    def ui_tts_available(self) -> bool:
+        return self.tts_available
+
+    def ui_title_reading_enabled(self, guild_id: int) -> bool:
+        return self.title_reading
+
+    def ui_chat_reading_enabled(self, guild_id: int) -> bool:
+        return self.chat_reading
 
 
 def _interaction(user_id: int = 10) -> MagicMock:
@@ -119,6 +137,32 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(idle.next_track.disabled)
         self.assertTrue(idle.pause_resume.disabled)
 
+    async def test_tts_controls_reflect_state_and_availability(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+
+        self.assertEqual(view.toggle_title_reading.label, "Đọc tên bài: Bật")
+        self.assertEqual(view.toggle_title_reading.style, discord.ButtonStyle.success)
+        self.assertFalse(view.toggle_title_reading.disabled)
+        self.assertEqual(view.toggle_chat_reading.label, "Đọc tin nhắn: Tắt")
+        self.assertEqual(view.toggle_chat_reading.style, discord.ButtonStyle.secondary)
+        self.assertFalse(view.toggle_chat_reading.disabled)
+
+        actions.title_reading = False
+        actions.chat_reading = True
+        view.sync(actions.current_snapshot)
+
+        self.assertEqual(view.toggle_title_reading.label, "Đọc tên bài: Tắt")
+        self.assertEqual(view.toggle_title_reading.style, discord.ButtonStyle.secondary)
+        self.assertEqual(view.toggle_chat_reading.label, "Đọc tin nhắn: Bật")
+        self.assertEqual(view.toggle_chat_reading.style, discord.ButtonStyle.success)
+
+        actions.tts_available = False
+        view.sync(actions.current_snapshot)
+
+        self.assertTrue(view.toggle_title_reading.disabled)
+        self.assertTrue(view.toggle_chat_reading.disabled)
+
     async def test_queue_paginator_uses_ten_items_per_page(self) -> None:
         queued = tuple(
             QueuedTrack(f"Bài {index}", f"https://youtube.test/{index}")
@@ -160,6 +204,68 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             "Đã tạm dừng.", ephemeral=True
         )
         self.manager.refresh.assert_awaited_once_with(1)
+
+    async def test_tts_buttons_allow_reconnect_and_delegate_ephemerally(self) -> None:
+        cases = (
+            (
+                self.view.toggle_title_reading,
+                self.actions.ui_toggle_title_reading,
+                "Đã tắt đọc tên bài.",
+            ),
+            (
+                self.view.toggle_chat_reading,
+                self.actions.ui_toggle_chat_reading,
+                "Đã bật đọc tin nhắn.",
+            ),
+        )
+        for button, action, message in cases:
+            with self.subTest(button=button.label):
+                interaction = _interaction()
+
+                await button.callback(interaction)
+
+                self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+                    interaction,
+                    1,
+                    2,
+                    connect_if_missing=True,
+                )
+                action.assert_awaited_once_with(interaction, 1, 2)
+                interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+                interaction.followup.send.assert_awaited_once_with(
+                    message,
+                    ephemeral=True,
+                )
+                self.manager.refresh.assert_awaited_once_with(1)
+
+                self.actions.ui_ensure_panel_access.reset_mock()
+                action.reset_mock()
+                self.manager.refresh.reset_mock()
+
+    async def test_tts_buttons_deny_before_action_or_defer(self) -> None:
+        self.actions.ui_ensure_panel_access.return_value = False
+        cases = (
+            (self.view.toggle_title_reading, self.actions.ui_toggle_title_reading),
+            (self.view.toggle_chat_reading, self.actions.ui_toggle_chat_reading),
+        )
+        for button, action in cases:
+            with self.subTest(button=button.label):
+                interaction = _interaction()
+
+                await button.callback(interaction)
+
+                self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+                    interaction,
+                    1,
+                    2,
+                    connect_if_missing=True,
+                )
+                action.assert_not_awaited()
+                interaction.response.defer.assert_not_awaited()
+                interaction.followup.send.assert_not_awaited()
+                self.manager.refresh.assert_not_awaited()
+
+                self.actions.ui_ensure_panel_access.reset_mock()
 
     async def test_outside_room_stops_before_control(self) -> None:
         self.actions.ui_ensure_panel_access.return_value = False

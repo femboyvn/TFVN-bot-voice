@@ -113,6 +113,7 @@ class MusicCog(commands.Cog, name="Music"):
             already = self.sessions.is_active(ctx.guild.id)
             session = self.sessions.start(ctx.guild, channel)
             action = "Đang trong phiên" if already else "Đã vào"
+            await self.music_ui.refresh(ctx.guild.id)
         await ctx.send(
             f"{action}: đang theo dõi chat của **{discord.utils.escape_markdown(session.voice_channel_name)}**. "
             "Tin nhắn tại đó sẽ được đọc bằng TTS. Dùng "
@@ -280,34 +281,19 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command()
     @commands.guild_only()
     async def stop(self, ctx: commands.Context[Any]) -> None:
-        """Stop music and clear the queue. TTS session stays until ``leave``."""
+        """Stop music and clear the queue without ending the voice session."""
         async with self._operation_lock(ctx.guild.id):
             if not await self._require_voice_control(ctx):
                 return
+            player = self.players.get(ctx.guild.id)
+            stopped = await player.stop_music() if player is not None else False
             session_active = self.sessions.is_active(ctx.guild.id)
-            voice_client = ctx.guild.voice_client
-            # Keep the voice connection when a chat session is still running.
-            had_player = await self.players.remove(
-                ctx.guild.id,
-                disconnect=not session_active,
-            )
-
-            disconnected = False
-            if (
-                not session_active
-                and not had_player
-                and voice_client
-                and voice_client.is_connected()
-            ):
-                disconnected = await disconnect_guild_voice_client(
-                    ctx.guild,
-                    expected_client=voice_client,
-                )
 
         if session_active:
-            if had_player:
+            if stopped:
                 await ctx.send(
-                    "Đã dừng nhạc. Phiên chat TTS vẫn đang chạy — "
+                    "Đã dừng nhạc và xóa hàng đợi. "
+                    "Phiên chat TTS vẫn đang chạy — "
                     f"dùng `{ctx.prefix}leave` để thoát."
                 )
             else:
@@ -317,11 +303,11 @@ class MusicCog(commands.Cog, name="Music"):
                 )
             return
 
-        if disconnected or (had_player and voice_client is not None):
-            await ctx.send("Đã dừng và rời kênh thoại.")
-            return
-        if had_player:
-            await ctx.send("Đã dừng.")
+        if stopped:
+            await ctx.send(
+                "Đã dừng nhạc và xóa hàng đợi. "
+                f"Dùng `{ctx.prefix}leave` để bot rời kênh thoại."
+            )
             return
         await ctx.send("Không có gì đang phát.")
 
@@ -501,6 +487,19 @@ class MusicCog(commands.Cog, name="Music"):
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None:
         player = self.players.get(guild_id)
         return player.snapshot() if player is not None else None
+
+    def ui_tts_available(self) -> bool:
+        """Return whether voice-reading controls are available globally."""
+        return self.settings.tts_enabled
+
+    def ui_title_reading_enabled(self, guild_id: int) -> bool:
+        return (
+            self.settings.tts_enabled
+            and self.players.title_announcements_enabled(guild_id)
+        )
+
+    def ui_chat_reading_enabled(self, guild_id: int) -> bool:
+        return self.settings.tts_enabled and self.sessions.is_active(guild_id)
 
     async def ui_ensure_panel_access(
         self,
@@ -724,36 +723,121 @@ class MusicCog(commands.Cog, name="Music"):
             )
             if error:
                 return error
-            guild = interaction.guild
-            if guild is None:
-                return "Bảng điều khiển này không còn hợp lệ."
+            player = self.players.get(guild_id)
+            stopped = await player.stop_music() if player is not None else False
             session_active = self.sessions.is_active(guild_id)
-            voice_client = guild.voice_client
-            had_player = await self.players.remove(
-                guild_id,
-                disconnect=not session_active,
-            )
-            disconnected = False
-            if (
-                not session_active
-                and not had_player
-                and voice_client
-                and voice_client.is_connected()
-            ):
-                disconnected = await disconnect_guild_voice_client(
-                    guild,
-                    expected_client=voice_client,
-                )
         if session_active:
             return (
-                "Đã dừng nhạc. Phiên chat TTS vẫn đang chạy."
-                if had_player
+                "Đã dừng nhạc và xóa hàng đợi. Đọc tin nhắn vẫn đang bật."
+                if stopped
                 else "Không có gì đang phát. Phiên chat TTS vẫn đang chạy."
             )
 
-        if disconnected or (had_player and voice_client is not None):
-            return "Đã dừng và rời kênh thoại."
-        return "Đã dừng." if had_player else "Không có gì đang phát."
+        if stopped:
+            return "Đã dừng nhạc và xóa hàng đợi. Bot vẫn ở kênh thoại."
+        return "Không có gì đang phát."
+
+    async def ui_toggle_title_reading(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+                allow_disconnected=True,
+            )
+            if error:
+                return error
+            if not self.settings.tts_enabled:
+                return "TTS đã bị tắt trong cấu hình bot."
+            enabled = self.players.toggle_title_announcements(guild_id)
+
+        if enabled:
+            return "Đã bật đọc tên bài hát."
+        return "Đã tắt đọc tên bài hát. Thông báo chữ vẫn được gửi."
+
+    async def ui_toggle_chat_reading(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+                allow_disconnected=True,
+            )
+            if error:
+                return error
+            if not self.settings.tts_enabled:
+                return "TTS đã bị tắt trong cấu hình bot."
+
+            guild = interaction.guild
+            if guild is None:
+                return "Bảng điều khiển này không còn hợp lệ."
+
+            session = self.sessions.get(guild_id)
+            if session is not None and session.active:
+                if session.voice_channel_id != voice_channel_id:
+                    return "Bảng điều khiển này không còn gắn với phiên chat TTS."
+
+                await self.sessions.stop(guild_id)
+                player = self.players.get(guild_id)
+                snapshot = player.snapshot() if player is not None else None
+                music_pending = snapshot is not None and (
+                    snapshot.current is not None or bool(snapshot.queued)
+                )
+                if music_pending:
+                    return "Đã tắt đọc tin nhắn. Nhạc vẫn tiếp tục phát."
+
+                voice_client = guild.voice_client
+                had_player = await self.players.remove(
+                    guild_id,
+                    disconnect=True,
+                )
+                if (
+                    not had_player
+                    and voice_client is not None
+                    and voice_client.is_connected()
+                ):
+                    await disconnect_guild_voice_client(
+                        guild,
+                        expected_client=voice_client,
+                    )
+                return "Đã tắt đọc tin nhắn."
+
+            player = self.players.get(guild_id)
+            if player is not None:
+                player.reserve_activity()
+            try:
+                try:
+                    voice_client = await connect_member_voice_client(
+                        guild,
+                        interaction.user,
+                        self.settings,
+                        expected_channel_id=voice_channel_id,
+                    )
+                except VoiceAccessError as exc:
+                    return str(exc)
+
+                channel = voice_client.channel
+                if not isinstance(
+                    channel,
+                    (discord.VoiceChannel, discord.StageChannel),
+                ):
+                    return "Không thể bắt đầu đọc chat trên loại kênh này."
+                self.sessions.start(guild, channel)
+            finally:
+                if player is not None:
+                    player.release_activity()
+
+        return "Đã bật đọc tin nhắn trong kênh thoại."
 
     async def _enqueue_interaction_batch(
         self,
@@ -850,6 +934,8 @@ class MusicCog(commands.Cog, name="Music"):
                 ctx.guild,
                 expected_client=voice_client,
             )
+
+        await self.music_ui.refresh(ctx.guild.id)
 
         if had_player or had_session or disconnected:
             if had_session:

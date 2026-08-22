@@ -472,6 +472,169 @@ class GuildPlayerQueueTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await player.close(disconnect=False)
 
+    async def test_stop_music_clears_loop_and_queue_without_disconnect_and_reuses_worker(
+        self,
+    ) -> None:
+        media = Mock()
+        first_stream = Track(
+            title="Current stream",
+            stream_url="https://stream.test/current",
+            duration=60,
+        )
+        replacement_stream = Track(
+            title="Replacement stream",
+            stream_url="https://stream.test/replacement",
+            duration=90,
+        )
+        media.resolve_queued = AsyncMock(
+            side_effect=(first_stream, replacement_stream)
+        )
+        media.create_audio_source.side_effect = (
+            lambda *_args, **_kwargs: _FakeAudioSource()
+        )
+        stopped = asyncio.Event()
+
+        async def listener(_guild_id: int, snapshot: PlayerSnapshot) -> None:
+            if (
+                snapshot.current is None
+                and not snapshot.queued
+                and snapshot.state is PlaybackState.IDLE
+            ):
+                stopped.set()
+
+        player, _, voice_client, idle = self._make_player(
+            media=media,
+            listener=listener,
+        )
+        channel = AsyncMock()
+        current = QueuedTrack("Current", "https://youtube.test/current", 60)
+        waiting = QueuedTrack("Waiting", "https://youtube.test/waiting", 70)
+        replacement = QueuedTrack(
+            "Replacement",
+            "https://youtube.test/replacement",
+            90,
+        )
+
+        try:
+            await player.enqueue_many((current, waiting), channel)
+            await asyncio.wait_for(
+                voice_client.play_notifications.get(),
+                timeout=1.0,
+            )
+            self.assertTrue(player.toggle_loop())
+
+            with patch(
+                "src.player.disconnect_guild_voice_client",
+                new=AsyncMock(),
+            ) as disconnect:
+                self.assertTrue(await player.stop_music())
+                await asyncio.wait_for(stopped.wait(), timeout=1.0)
+                disconnect.assert_not_awaited()
+
+            snapshot = player.snapshot()
+            self.assertIsNone(snapshot.current)
+            self.assertEqual(snapshot.queued, ())
+            self.assertIs(snapshot.state, PlaybackState.IDLE)
+            self.assertFalse(snapshot.loop_current)
+            self.assertTrue(voice_client.is_connected())
+            self.assertEqual(voice_client.stop_calls, 1)
+            self.assertFalse(player._task.done())
+            idle.assert_not_awaited()
+
+            # Stop preserves the player task, so new music can reuse it.
+            await player.enqueue(replacement, channel)
+            await asyncio.wait_for(
+                voice_client.play_notifications.get(),
+                timeout=1.0,
+            )
+            self.assertEqual(player.current, replacement)
+            self.assertIs(player.state, PlaybackState.PLAYING)
+        finally:
+            await player.close(disconnect=False)
+
+    async def test_stop_music_cancels_loading_track_and_drops_waiting_tracks(
+        self,
+    ) -> None:
+        media = Mock()
+        resolution_started = asyncio.Event()
+        resolution_cancelled = asyncio.Event()
+        allow_hung_resolution = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def resolve(_item: QueuedTrack) -> Track:
+            resolution_started.set()
+            try:
+                await allow_hung_resolution.wait()
+            except asyncio.CancelledError:
+                resolution_cancelled.set()
+                raise
+            raise AssertionError("slow resolution should have been cancelled")
+
+        async def listener(_guild_id: int, snapshot: PlayerSnapshot) -> None:
+            if (
+                snapshot.current is None
+                and not snapshot.queued
+                and snapshot.state is PlaybackState.IDLE
+            ):
+                stopped.set()
+
+        media.resolve_queued = AsyncMock(side_effect=resolve)
+        media.create_audio_source.return_value = _FakeAudioSource()
+        player, _, voice_client, idle = self._make_player(
+            media=media,
+            listener=listener,
+        )
+        channel = AsyncMock()
+        slow = QueuedTrack("Slow", "https://youtube.test/slow")
+        waiting = QueuedTrack("Waiting", "https://youtube.test/waiting")
+
+        try:
+            await player.enqueue_many((slow, waiting), channel)
+            await asyncio.wait_for(resolution_started.wait(), timeout=1.0)
+            self.assertIs(player.state, PlaybackState.LOADING)
+
+            self.assertTrue(await player.stop_music())
+            await asyncio.wait_for(resolution_cancelled.wait(), timeout=1.0)
+            await asyncio.wait_for(stopped.wait(), timeout=1.0)
+
+            snapshot = player.snapshot()
+            self.assertIsNone(snapshot.current)
+            self.assertEqual(snapshot.queued, ())
+            self.assertIs(snapshot.state, PlaybackState.IDLE)
+            self.assertFalse(snapshot.loop_current)
+            self.assertTrue(voice_client.is_connected())
+            self.assertTrue(voice_client.play_notifications.empty())
+            media.create_audio_source.assert_not_called()
+            idle.assert_not_awaited()
+            self.assertFalse(player._task.done())
+        finally:
+            allow_hung_resolution.set()
+            await player.close(disconnect=False)
+
+    async def test_stop_music_handles_queue_only_and_noop(self) -> None:
+        listener = AsyncMock()
+        player, _, voice_client, idle = self._make_player(listener=listener)
+        channel = AsyncMock()
+        waiting = QueuedTrack("Waiting", "https://youtube.test/waiting")
+
+        try:
+            await player.enqueue(waiting, channel)
+            self.assertIsNone(player.current)
+            self.assertEqual(player.snapshot().queued, (waiting,))
+
+            self.assertTrue(await player.stop_music())
+            self.assertEqual(player.snapshot().queued, ())
+            notifications = listener.await_count
+
+            self.assertFalse(await player.stop_music())
+            self.assertEqual(listener.await_count, notifications)
+            self.assertTrue(voice_client.is_connected())
+            self.assertEqual(voice_client.stop_calls, 0)
+            idle.assert_not_awaited()
+            self.assertFalse(player._task.done())
+        finally:
+            await player.close(disconnect=False)
+
     async def test_loop_re_resolves_canonical_url_before_each_replay(self) -> None:
         media = Mock()
         first_stream = Track(
@@ -1000,6 +1163,54 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_title_announcement_preference_updates_and_survives_recreate(
+        self,
+    ) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        manager = PlayerManager(
+            bot,
+            Mock(),
+            volume=0.5,
+            idle_timeout=10.0,
+            tts=None,
+            tts_enabled=True,
+        )
+        guild = Mock()
+        guild.id = 69
+        guild.voice_client = None
+
+        self.assertTrue(manager.title_announcements_enabled(69))
+        player = await manager.get_or_create(guild)
+        self.assertTrue(player.tts_enabled)
+
+        self.assertFalse(manager.toggle_title_announcements(69))
+        self.assertFalse(manager.title_announcements_enabled(69))
+        self.assertFalse(player.tts_enabled)
+
+        self.assertTrue(await manager.remove(69, disconnect=False))
+        recreated = await manager.get_or_create(guild)
+        self.assertIsNot(recreated, player)
+        self.assertFalse(recreated.tts_enabled)
+
+        self.assertTrue(manager.set_title_announcements(69, True))
+        self.assertTrue(recreated.tts_enabled)
+        await manager.remove(69, disconnect=False)
+
+    async def test_title_announcement_unseen_guild_uses_config_default(self) -> None:
+        manager = PlayerManager(
+            Mock(),
+            Mock(),
+            volume=0.5,
+            idle_timeout=10.0,
+            tts=None,
+            tts_enabled=False,
+        )
+
+        self.assertFalse(manager.title_announcements_enabled(404))
+        self.assertFalse(manager.toggle_title_announcements(404))
+        self.assertFalse(manager.title_announcements_enabled(404))
+
     async def test_enqueue_during_idle_notification_keeps_player_alive(self) -> None:
         bot = Mock()
         bot.loop = asyncio.get_running_loop()

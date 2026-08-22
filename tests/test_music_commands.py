@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+import discord
 
 from src.media import MediaBatch, QueuedTrack
 from src.cogs.music import MusicCog
@@ -17,6 +19,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.bot = Mock()
         self.settings = Mock()
         self.settings.command_prefix = "!tfd "
+        self.settings.tts_enabled = True
         self.media = Mock()
         self.players = Mock()
         self.players.add_state_listener = Mock()
@@ -48,42 +51,335 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_with_session_keeps_connection_and_session(self) -> None:
         self.sessions.is_active.return_value = True
-        self.players.remove = AsyncMock(return_value=True)
+        player = Mock()
+        player.stop_music = AsyncMock(return_value=True)
+        self.players.get.return_value = player
+        self.players.remove = AsyncMock()
         self.sessions.stop = AsyncMock()
 
-        await self.cog.stop.callback(self.cog, self.ctx)
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.stop.callback(self.cog, self.ctx)
 
-        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        player.stop_music.assert_awaited_once_with()
+        self.players.remove.assert_not_awaited()
         self.sessions.stop.assert_not_called()
+        disconnect.assert_not_awaited()
         self.ctx.voice_client.disconnect.assert_not_called()
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("Đã dừng nhạc", sent)
-        self.assertIn("leave", sent)
+        self.assertNotIn("rời", sent.lower())
 
-    async def test_stop_without_session_disconnects(self) -> None:
+    async def test_stop_without_session_keeps_voice_connection(self) -> None:
         self.sessions.is_active.return_value = False
-        self.players.remove = AsyncMock(return_value=True)
+        player = Mock()
+        player.stop_music = AsyncMock(return_value=True)
+        self.players.get.return_value = player
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
 
-        await self.cog.stop.callback(self.cog, self.ctx)
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.stop.callback(self.cog, self.ctx)
 
-        self.players.remove.assert_awaited_once_with(1, disconnect=True)
-        # PlayerManager owns the captured voice-client disconnect. The command
-        # must not fetch and disconnect a possibly newer client after removal.
+        player.stop_music.assert_awaited_once_with()
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        disconnect.assert_not_awaited()
         self.ctx.voice_client.disconnect.assert_not_awaited()
         sent = self.ctx.send.await_args.args[0]
-        self.assertIn("rời", sent.lower())
+        self.assertIn("Đã dừng nhạc", sent)
+        self.assertIn("Dùng `!tfd leave`", sent)
+        self.assertNotIn("Đã dừng và rời", sent)
+
+    async def test_stop_without_player_keeps_voice_and_session(self) -> None:
+        self.sessions.is_active.return_value = True
+        self.sessions.stop = AsyncMock()
+        self.players.get.return_value = None
+        self.players.remove = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.stop.callback(self.cog, self.ctx)
+
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        disconnect.assert_not_awaited()
+        self.ctx.voice_client.disconnect.assert_not_awaited()
+        self.assertIn("Không có gì đang phát", self.ctx.send.await_args.args[0])
 
     async def test_leave_ends_session_and_disconnects(self) -> None:
         self.players.remove = AsyncMock(return_value=True)
         self.sessions.stop = AsyncMock(return_value=True)
+        self.cog.music_ui.refresh = AsyncMock()
 
         await self.cog.leave.callback(self.cog, self.ctx)
 
         self.players.remove.assert_awaited_once_with(1, disconnect=False)
         self.sessions.stop.assert_awaited_once_with(1)
         self.ctx.voice_client.disconnect.assert_awaited()
+        self.cog.music_ui.refresh.assert_awaited_once_with(1)
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("theo dõi", sent.lower())
+
+    async def test_join_starts_session_and_refreshes_panel(self) -> None:
+        channel = MagicMock(spec=discord.VoiceChannel)
+        channel.id = 7
+        channel.name = "Phòng nhạc"
+        self.ctx.voice_client.channel = channel
+        self.ctx.author.voice.channel = channel
+        self.cog._connect_for_context = AsyncMock(
+            return_value=self.ctx.voice_client
+        )
+        self.sessions.is_active.return_value = False
+        session = Mock()
+        session.voice_channel_name = "Phòng nhạc"
+        self.sessions.start.return_value = session
+        self.cog.music_ui.refresh = AsyncMock()
+
+        await self.cog.join.callback(self.cog, self.ctx)
+
+        self.sessions.start.assert_called_once_with(self.ctx.guild, channel)
+        self.cog.music_ui.refresh.assert_awaited_once_with(1)
+        self.assertIn("theo dõi chat", self.ctx.send.await_args.args[0])
+
+    def _make_panel_interaction(self) -> MagicMock:
+        interaction = MagicMock()
+        interaction.guild = self.ctx.guild
+        interaction.user = self.ctx.author
+        interaction.channel = self.ctx.channel
+        interaction.extras = {}
+        return interaction
+
+    async def test_panel_stop_keeps_voice_and_chat_session_state(self) -> None:
+        interaction = self._make_panel_interaction()
+
+        for session_active in (False, True):
+            with self.subTest(session_active=session_active):
+                player = Mock()
+                player.stop_music = AsyncMock(return_value=True)
+                self.players.get.return_value = player
+                self.players.remove = AsyncMock()
+                self.sessions.is_active.return_value = session_active
+                self.sessions.stop = AsyncMock()
+
+                with patch(
+                    "src.cogs.music.disconnect_guild_voice_client",
+                    new=AsyncMock(),
+                ) as disconnect:
+                    result = await self.cog.ui_stop(interaction, 1, 7)
+
+                player.stop_music.assert_awaited_once_with()
+                self.players.remove.assert_not_awaited()
+                self.sessions.stop.assert_not_awaited()
+                disconnect.assert_not_awaited()
+                self.ctx.voice_client.disconnect.assert_not_awaited()
+                self.assertIn("Đã dừng nhạc", result)
+                self.assertNotIn("rời", result.lower())
+
+    async def test_panel_stop_without_player_does_not_disconnect(self) -> None:
+        interaction = self._make_panel_interaction()
+        self.players.get.return_value = None
+        self.players.remove = AsyncMock()
+        self.sessions.is_active.return_value = False
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            result = await self.cog.ui_stop(interaction, 1, 7)
+
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        disconnect.assert_not_awaited()
+        self.ctx.voice_client.disconnect.assert_not_awaited()
+        self.assertIn("Không có gì đang phát", result)
+
+    async def test_title_reading_toggle_updates_guild_preference(self) -> None:
+        interaction = self._make_panel_interaction()
+        self.players.toggle_title_announcements = Mock(return_value=False)
+
+        result = await self.cog.ui_toggle_title_reading(interaction, 1, 7)
+
+        self.players.toggle_title_announcements.assert_called_once_with(1)
+        self.assertIn("tắt đọc tên bài", result.lower())
+        self.assertIn("vẫn được gửi", result.lower())
+
+    async def test_global_tts_gate_blocks_reading_toggles_and_state(self) -> None:
+        interaction = self._make_panel_interaction()
+        self.settings.tts_enabled = False
+        self.players.title_announcements_enabled = Mock(return_value=True)
+        self.players.toggle_title_announcements = Mock()
+        self.sessions.is_active.return_value = True
+        self.sessions.get = Mock()
+
+        self.assertFalse(self.cog.ui_tts_available())
+        self.assertFalse(self.cog.ui_title_reading_enabled(1))
+        self.assertFalse(self.cog.ui_chat_reading_enabled(1))
+        title_result = await self.cog.ui_toggle_title_reading(
+            interaction,
+            1,
+            7,
+        )
+        chat_result = await self.cog.ui_toggle_chat_reading(
+            interaction,
+            1,
+            7,
+        )
+
+        self.players.toggle_title_announcements.assert_not_called()
+        self.sessions.get.assert_not_called()
+        self.assertIn("cấu hình bot", title_result.lower())
+        self.assertIn("cấu hình bot", chat_result.lower())
+
+    async def test_title_toggle_rechecks_outsider_after_waiting_for_lock(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        self.players.toggle_title_announcements = Mock()
+        lock = self.cog._operation_lock(1)
+        await lock.acquire()
+        task = asyncio.create_task(
+            self.cog.ui_toggle_title_reading(interaction, 1, 7)
+        )
+        try:
+            await asyncio.sleep(0)
+            outside = Mock()
+            outside.id = 99
+            interaction.user.voice.channel = outside
+        finally:
+            lock.release()
+
+        result = await asyncio.wait_for(task, timeout=1.0)
+        self.players.toggle_title_announcements.assert_not_called()
+        self.assertIn("đúng kênh thoại", result.lower())
+
+    async def test_chat_toggle_rechecks_stale_panel_after_waiting_for_lock(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        original_view = object()
+        interaction.extras = {PANEL_INTERACTION_TOKEN: original_view}
+        current_record = Mock()
+        current_record.view = original_view
+        self.cog.music_ui.get = Mock(return_value=current_record)
+        self.sessions.get = Mock()
+        lock = self.cog._operation_lock(1)
+        await lock.acquire()
+        task = asyncio.create_task(
+            self.cog.ui_toggle_chat_reading(interaction, 1, 7)
+        )
+        try:
+            await asyncio.sleep(0)
+            replacement = Mock()
+            replacement.view = object()
+            self.cog.music_ui.get.return_value = replacement
+        finally:
+            lock.release()
+
+        result = await asyncio.wait_for(task, timeout=1.0)
+        self.sessions.get.assert_not_called()
+        self.assertIn("thay thế", result.lower())
+
+    async def test_chat_toggle_on_reconnects_bound_room_and_starts_session(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        channel = MagicMock(spec=discord.VoiceChannel)
+        channel.id = 7
+        channel.name = "Phòng nhạc"
+        interaction.user.voice.channel = channel
+        interaction.guild.voice_client = None
+        voice_client = MagicMock()
+        voice_client.channel = channel
+        self.sessions.get.return_value = None
+        self.sessions.start = Mock()
+        self.players.get.return_value = None
+
+        with patch(
+            "src.cogs.music.connect_member_voice_client",
+            new=AsyncMock(return_value=voice_client),
+        ) as connect:
+            result = await self.cog.ui_toggle_chat_reading(
+                interaction,
+                1,
+                7,
+            )
+
+        connect.assert_awaited_once_with(
+            interaction.guild,
+            interaction.user,
+            self.settings,
+            expected_channel_id=7,
+        )
+        self.sessions.start.assert_called_once_with(interaction.guild, channel)
+        self.assertIn("bật đọc tin nhắn", result.lower())
+
+    async def test_chat_toggle_off_preserves_current_music_and_connection(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        session = Mock()
+        session.active = True
+        session.voice_channel_id = 7
+        self.sessions.get.return_value = session
+        self.sessions.stop = AsyncMock(return_value=True)
+        player = Mock()
+        snapshot = Mock()
+        snapshot.current = QueuedTrack(
+            "Đang phát",
+            "https://www.youtube.com/watch?v=playing",
+        )
+        snapshot.queued = ()
+        player.snapshot.return_value = snapshot
+        self.players.get.return_value = player
+        self.players.remove = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            result = await self.cog.ui_toggle_chat_reading(
+                interaction,
+                1,
+                7,
+            )
+
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.players.remove.assert_not_awaited()
+        disconnect.assert_not_awaited()
+        self.ctx.voice_client.disconnect.assert_not_awaited()
+        self.assertIn("nhạc vẫn tiếp tục", result.lower())
+
+    async def test_chat_toggle_off_disconnects_when_no_music_exists(self) -> None:
+        interaction = self._make_panel_interaction()
+        session = Mock()
+        session.active = True
+        session.voice_channel_id = 7
+        self.sessions.get.return_value = session
+        self.sessions.stop = AsyncMock(return_value=True)
+        self.players.get.return_value = None
+        self.players.remove = AsyncMock(return_value=False)
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=True),
+        ) as disconnect:
+            await self.cog.ui_toggle_chat_reading(interaction, 1, 7)
+
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.players.remove.assert_awaited_once_with(1, disconnect=True)
+        disconnect.assert_awaited_once_with(
+            interaction.guild,
+            expected_client=self.ctx.voice_client,
+        )
 
     async def test_nameannounce_requires_active_session(self) -> None:
         self.sessions.get.return_value = None
@@ -223,41 +519,39 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
             return_value=self.ctx.voice_client
         )
         self.sessions.is_active.return_value = False
-        remove_started = asyncio.Event()
-        allow_remove = asyncio.Event()
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
 
-        async def blocked_remove(
-            guild_id: int,
-            *,
-            disconnect: bool = True,
-        ) -> bool:
-            self.assertEqual(guild_id, 1)
-            self.assertTrue(disconnect)
-            remove_started.set()
-            await allow_remove.wait()
+        async def blocked_stop() -> bool:
+            stop_started.set()
+            await allow_stop.wait()
             return True
 
-        self.players.remove = AsyncMock(side_effect=blocked_remove)
+        player.stop_music = AsyncMock(side_effect=blocked_stop)
+        self.players.get.return_value = player
+        self.players.remove = AsyncMock()
         stopping = asyncio.create_task(self.cog.stop.callback(self.cog, self.ctx))
         adding = None
         try:
-            await asyncio.wait_for(remove_started.wait(), timeout=1.0)
+            await asyncio.wait_for(stop_started.wait(), timeout=1.0)
             adding = asyncio.create_task(
                 self.cog.play.callback(self.cog, self.ctx, query="Bài mới")
             )
             await asyncio.sleep(0)
             self.media.prepare.assert_awaited_once_with("Bài mới")
             self.players.get_or_create.assert_not_awaited()
-            allow_remove.set()
+            allow_stop.set()
             await asyncio.wait_for(stopping, timeout=1.0)
             await asyncio.wait_for(adding, timeout=1.0)
         finally:
-            allow_remove.set()
+            allow_stop.set()
             if not stopping.done():
                 await stopping
             if adding is not None and not adding.done():
                 await adding
 
+        player.stop_music.assert_awaited_once_with()
+        self.players.remove.assert_not_awaited()
         self.players.get_or_create.assert_awaited_once_with(self.ctx.guild)
         player.enqueue_many.assert_awaited_once_with((item,), self.ctx.channel)
 

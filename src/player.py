@@ -173,6 +173,32 @@ class GuildPlayer:
             await self._notify_state_change()
         return removed
 
+    async def stop_music(self) -> bool:
+        """Stop the current track and clear waiting music without disconnecting.
+
+        The player worker stays alive so an existing voice-chat session keeps
+        running and later music can reuse the same connection. The normal idle
+        timeout still owns eventual player retirement.
+        """
+        if self._closed:
+            return False
+
+        had_current = self.current is not None
+        removed = self._drain_queue()
+        if not had_current and not removed:
+            return False
+
+        # Keep draining the queue and requesting the current-track skip in one
+        # event-loop turn. Otherwise playback could advance to an entry that
+        # Stop was meant to remove. A queue-only stop also restarts an existing
+        # idle deadline instead of appearing to disconnect immediately.
+        self._activity_version += 1
+        self.loop_current = False
+        skip_requested = self.skip() if had_current else False
+        if not skip_requested:
+            await self._notify_state_change()
+        return True
+
     @property
     def state(self) -> PlaybackState:
         return self._state
@@ -773,11 +799,38 @@ class PlayerManager:
         self.duck_level = duck_level
         self.keep_connected = keep_connected or (lambda _guild_id: False)
         self._players: dict[int, GuildPlayer] = {}
+        # Preferences outlive individual idle/stopped GuildPlayer instances.
+        self._title_announcement_preferences: dict[int, bool] = {}
         self._state_listeners: list[StateChangeListener] = []
         self._lifecycle_locks: dict[int, asyncio.Lock] = {}
 
     def get(self, guild_id: int) -> GuildPlayer | None:
         return self._players.get(guild_id)
+
+    def title_announcements_enabled(self, guild_id: int) -> bool:
+        """Return the guild preference for spoken song-title announcements."""
+        return self._title_announcement_preferences.get(
+            guild_id,
+            self.tts_enabled,
+        )
+
+    def set_title_announcements(self, guild_id: int, enabled: bool) -> bool:
+        """Set and apply a guild's spoken song-title preference."""
+        # The environment setting is the master switch; a runtime preference
+        # must never re-enable synthesis when TTS is globally unavailable.
+        value = bool(enabled and self.tts_enabled)
+        self._title_announcement_preferences[guild_id] = value
+        player = self._players.get(guild_id)
+        if player is not None:
+            player.tts_enabled = value
+        return value
+
+    def toggle_title_announcements(self, guild_id: int) -> bool:
+        """Toggle spoken song-title announcements and return the new value."""
+        return self.set_title_announcements(
+            guild_id,
+            not self.title_announcements_enabled(guild_id),
+        )
 
     def add_state_listener(self, listener: StateChangeListener) -> None:
         """Subscribe an async listener to snapshots from every guild player."""
@@ -802,7 +855,7 @@ class PlayerManager:
                     idle_timeout=self.idle_timeout,
                     on_idle=self._remove_idle,
                     tts=self.tts,
-                    tts_enabled=self.tts_enabled,
+                    tts_enabled=self.title_announcements_enabled(guild.id),
                     duck_level=self.duck_level,
                     on_state_change=self._dispatch_state_change,
                 )

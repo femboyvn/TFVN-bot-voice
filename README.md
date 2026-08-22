@@ -37,7 +37,7 @@ The default prefix is `!tfd `, including the trailing space.
 | --- | --- |
 | `!tfd music` | Join your VC and open its shared interactive music panel |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
-| `!tfd leave` | End the chat session and leave voice |
+| `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **on** for new sessions) |
 | `!tfd play <URL or query>` | Join voice and queue a track |
 | `!tfd next <URL or query>` | Add another track to the queue |
@@ -46,7 +46,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd jump HH:MM:SS` | Jump to a timestamp in the current track |
 | `!tfd skip` | Skip the current track |
 | `!tfd loop` | Toggle looping for the current track |
-| `!tfd stop` | Stop music only (TTS session keeps running if you used `join`) |
+| `!tfd stop` | Stop the current track and clear the queue without leaving voice |
 | `!tfd search <query>` | Show five YouTube search results |
 
 ### Shared music panel
@@ -57,15 +57,25 @@ The default prefix is `!tfd `, including the trailing space.
 3. A playlist appends its available videos in order, inspecting at most the first 25
    entries per request. Unavailable entries are skipped.
 4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
-   timestamp jump, queue view, clear queue, and stop. Members outside that channel,
-   including administrators, cannot control playback or move the bot.
+   timestamp jump, queue view, clear queue, stop, **Đọc tên bài**, and
+   **Đọc tin nhắn**. Members outside that channel, including administrators, cannot
+   use these controls or move the bot.
 5. The public panel shows the current track and the next five queued tracks. Search
    results, queue pages, confirmations, and errors are visible only to the requester.
+6. **Đọc tên bài** toggles the spoken song-title announcement; the text
+   **Đang phát** announcement is still posted when speech is off. **Đọc tin nhắn**
+   starts or stops reading the voice channel's text chat without stopping music.
+   A phrase already being spoken may finish after either control is turned off.
+
+Both speech controls are unavailable when `TTS_ENABLED=false`.
 
 Only one panel is active per Discord server during the current process. Opening a new
 panel disables the old one.
 After a bot restart, run `!tfd music` again. **Xóa hàng đợi** removes waiting tracks
-but leaves the current track playing; **Dừng** stops the current track and clears the queue.
+but leaves the current track playing. **Dừng** stops the current track and clears the
+queue without ending chat reading or immediately leaving voice; `!tfd leave` stops
+music, ends chat reading, and disconnects. When chat reading is off, the normal player
+idle timeout may disconnect the bot later.
 
 All voice and playback commands use the same room rule as the panel. If the bot is
 already connected to another voice channel, it stays there and tells the caller to join

@@ -49,6 +49,12 @@ class MusicUIActions(Protocol):
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None: ...
 
+    def ui_tts_available(self) -> bool: ...
+
+    def ui_title_reading_enabled(self, guild_id: int) -> bool: ...
+
+    def ui_chat_reading_enabled(self, guild_id: int) -> bool: ...
+
     async def ui_ensure_panel_access(
         self,
         interaction: discord.Interaction,
@@ -103,6 +109,14 @@ class MusicUIActions(Protocol):
     ) -> str: ...
 
     async def ui_stop(
+        self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_toggle_title_reading(
+        self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_toggle_chat_reading(
         self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
     ) -> str: ...
 
@@ -572,6 +586,26 @@ class MusicPanelView(discord.ui.View):
         self.show_queue.disabled = waiting == 0
         self.clear_queue.disabled = waiting == 0
         self.stop_music.disabled = not has_current and waiting == 0 and state is PlaybackState.IDLE
+        title_reading = self.actions.ui_title_reading_enabled(self.guild_id)
+        self.toggle_title_reading.label = (
+            f"Đọc tên bài: {'Bật' if title_reading else 'Tắt'}"
+        )
+        self.toggle_title_reading.style = (
+            discord.ButtonStyle.success
+            if title_reading
+            else discord.ButtonStyle.secondary
+        )
+        self.toggle_title_reading.disabled = not self.actions.ui_tts_available()
+        chat_reading = self.actions.ui_chat_reading_enabled(self.guild_id)
+        self.toggle_chat_reading.label = (
+            f"Đọc tin nhắn: {'Bật' if chat_reading else 'Tắt'}"
+        )
+        self.toggle_chat_reading.style = (
+            discord.ButtonStyle.success
+            if chat_reading
+            else discord.ButtonStyle.secondary
+        )
+        self.toggle_chat_reading.disabled = not self.actions.ui_tts_available()
 
     async def ensure_access(
         self,
@@ -598,8 +632,17 @@ class MusicPanelView(discord.ui.View):
             connect_if_missing=connect_if_missing,
         )
 
-    async def _run(self, interaction: discord.Interaction, action: str) -> None:
-        if not await self.ensure_access(interaction):
+    async def _run(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        *,
+        connect_if_missing: bool = False,
+    ) -> None:
+        if not await self.ensure_access(
+            interaction,
+            connect_if_missing=connect_if_missing,
+        ):
             return
         await interaction.response.defer(ephemeral=True)
         message = await getattr(self.actions, f"ui_{action}")(
@@ -675,6 +718,40 @@ class MusicPanelView(discord.ui.View):
     @discord.ui.button(label="Dừng", emoji="⏹️", style=discord.ButtonStyle.danger, row=1)
     async def stop_music(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._run(interaction, "stop")
+
+    @discord.ui.button(
+        label="Đọc tên bài: Bật",
+        emoji="🔈",
+        style=discord.ButtonStyle.success,
+        row=2,
+    )
+    async def toggle_title_reading(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run(
+            interaction,
+            "toggle_title_reading",
+            connect_if_missing=True,
+        )
+
+    @discord.ui.button(
+        label="Đọc tin nhắn: Tắt",
+        emoji="💬",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def toggle_chat_reading(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run(
+            interaction,
+            "toggle_chat_reading",
+            connect_if_missing=True,
+        )
 
 
 @dataclass(slots=True)
