@@ -72,7 +72,8 @@ The default prefix is `!tfd `, including the trailing space.
    music volume accepts `0`–`200` percent; music level while TTS is speaking accepts
    `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction);
    and TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
-   or `ko`.
+   or `ko`. The same form controls automatic panel bumping in whole minutes: `0`
+   disables it, while `1`–`1440` reposts the panel at that interval.
 
 Audio settings are shared per Discord server, not per user, and changing them from
 the panel affects current and future playback in that server. Music volume and the
@@ -83,14 +84,18 @@ Music volume controls the music track only and does not change TTS loudness.
 
 Runtime audio settings are kept in memory. They reset to `DEFAULT_VOLUME`,
 `MUSIC_DUCK_LEVEL`, and `TTS_LANG` from the environment whenever the bot process
-restarts; no database persistence is performed.
+restarts; the automatic panel-bump interval also resets to off. No database
+persistence is performed.
 
 Both speech controls are unavailable when `TTS_ENABLED=false`. In that mode,
 **Cài đặt** still allows music-volume changes, while the inactive TTS fields are hidden
 and left unchanged.
 
 Only one panel is active per Discord server during the current process. Opening a new
-panel disables the old one.
+panel disables the old one. An automatic bump sends a fresh panel at the bottom of
+the same text channel and then deletes the superseded panel, without changing music,
+queue, voice-room binding, or TTS state. If deleting the old message fails, its
+controls are disabled instead. Automatic bumps pause while the bot is disconnected.
 After a bot restart, run `!tfd music` again. **Xóa hàng đợi** removes waiting tracks
 but leaves the current track playing. **Dừng** stops the current track and clears the
 queue without ending chat reading or immediately leaving voice; `!tfd leave` stops

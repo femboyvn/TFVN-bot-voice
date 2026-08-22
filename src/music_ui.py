@@ -26,6 +26,8 @@ SEARCH_VIEW_TIMEOUT = 120.0
 CLEAR_CONFIRM_TIMEOUT = 30.0
 QUEUE_PAGE_SIZE = 10
 PANEL_INTERACTION_TOKEN = "tfd_music_panel_view"
+MIN_PANEL_BUMP_MINUTES = 1
+MAX_PANEL_BUMP_MINUTES = 1440
 
 
 class AudioSettingsValidationError(ValueError):
@@ -75,6 +77,29 @@ def _format_percentage(value: float) -> str:
     return f"{value * 100:.2f}".rstrip("0").rstrip(".")
 
 
+def parse_panel_bump_interval(value: str) -> int:
+    """Parse the shared automatic panel-repost interval in whole minutes."""
+    normalized = value.strip()
+    try:
+        minutes = int(normalized)
+    except ValueError as exc:
+        raise AudioSettingsValidationError(
+            "Thời gian đưa bảng lên phải là 0 hoặc số phút từ 1 đến 1440."
+        ) from exc
+    if minutes != 0 and not (
+        MIN_PANEL_BUMP_MINUTES <= minutes <= MAX_PANEL_BUMP_MINUTES
+    ):
+        raise AudioSettingsValidationError(
+            "Thời gian đưa bảng lên phải là 0 hoặc số phút từ 1 đến 1440."
+        )
+    return minutes
+
+
+def format_panel_bump_interval(minutes: int) -> str:
+    """Render a concise public description of automatic panel reposting."""
+    return "Tắt" if minutes == 0 else f"Mỗi {minutes} phút"
+
+
 def format_audio_settings(settings: GuildAudioSettings) -> str:
     """Render shared audio settings for embeds and confirmations."""
     return (
@@ -114,6 +139,8 @@ class MusicUIActions(Protocol):
     def ui_chat_reading_enabled(self, guild_id: int) -> bool: ...
 
     def ui_voice_connected(self, guild_id: int) -> bool: ...
+
+    def ui_voice_channel_id(self, guild_id: int) -> int | None: ...
 
     def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings: ...
 
@@ -192,6 +219,7 @@ class MusicUIActions(Protocol):
         guild_id: int,
         voice_channel_id: int,
         settings: GuildAudioSettings,
+        panel_bump_minutes: int,
     ) -> str: ...
 
 
@@ -232,6 +260,7 @@ def build_music_embed(
     voice_channel_id: int,
     snapshot: PlayerSnapshot | None,
     audio_settings: GuildAudioSettings | None = None,
+    panel_bump_minutes: int | None = None,
 ) -> discord.Embed:
     """Render the public panel state from an immutable player snapshot."""
     state = snapshot.state if snapshot is not None else PlaybackState.IDLE
@@ -263,6 +292,12 @@ def build_music_embed(
             name="Cài đặt âm thanh",
             value=format_audio_settings(audio_settings),
             inline=False,
+        )
+    if panel_bump_minutes is not None:
+        embed.add_field(
+            name="Tự đưa bảng lên",
+            value=format_panel_bump_interval(panel_bump_minutes),
+            inline=True,
         )
     next_tracks = "\n".join(_track_line(track, index) for index, track in enumerate(queued[:5], 1))
     embed.add_field(name="Tiếp theo", value=next_tracks or "Hàng đợi trống.", inline=False)
@@ -535,7 +570,7 @@ class JumpModal(discord.ui.Modal, title="Tua đến"):
         await view.manager.refresh(view.guild_id)
 
 
-class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
+class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
     music_volume = discord.ui.TextInput(
         label="Âm lượng nhạc (%)",
         placeholder="0–200; ví dụ: 70",
@@ -554,6 +589,12 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
         required=True,
         max_length=20,
     )
+    panel_bump_minutes = discord.ui.TextInput(
+        label="Đưa bảng lên lại (phút)",
+        placeholder="0 = tắt; hoặc nhập từ 1 đến 1440",
+        required=True,
+        max_length=4,
+    )
 
     def __init__(
         self,
@@ -561,6 +602,7 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
         settings: GuildAudioSettings,
         *,
         tts_available: bool = True,
+        panel_bump_minutes: int = 0,
     ) -> None:
         super().__init__(timeout=SEARCH_VIEW_TIMEOUT)
         self.panel_view = view
@@ -569,6 +611,7 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
         self.music_volume.default = _format_percentage(settings.music_volume)
         self.duck_level.default = _format_percentage(settings.duck_level)
         self.tts_language.default = settings.tts_language
+        self.panel_bump_minutes.default = str(panel_bump_minutes)
         if not tts_available:
             self.remove_item(self.duck_level)
             self.remove_item(self.tts_language)
@@ -579,6 +622,9 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
             return
         await interaction.response.defer(ephemeral=True)
         try:
+            panel_bump_minutes = parse_panel_bump_interval(
+                str(self.panel_bump_minutes)
+            )
             if self.tts_available:
                 settings = parse_audio_settings(
                     str(self.music_volume),
@@ -604,6 +650,7 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
             view.guild_id,
             view.voice_channel_id,
             settings,
+            panel_bump_minutes,
         )
         await interaction.followup.send(message, ephemeral=True)
         await view.manager.refresh(view.guild_id)
@@ -927,6 +974,9 @@ class MusicPanelView(discord.ui.View):
                 self,
                 self.actions.ui_audio_settings(self.guild_id),
                 tts_available=self.actions.ui_tts_available(),
+                panel_bump_minutes=self.manager.bump_interval_minutes(
+                    self.guild_id
+                ),
             )
         )
 
@@ -948,6 +998,7 @@ class MusicPanelView(discord.ui.View):
 class MusicPanelRecord:
     guild_id: int
     voice_channel_id: int
+    destination: discord.abc.Messageable
     message: discord.Message
     view: MusicPanelView
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -996,10 +1047,30 @@ class MusicPanelManager:
         self.registry = registry or MusicPanelRegistry()
         self._post_locks: dict[int, asyncio.Lock] = {}
         self._refresh_tasks: set[asyncio.Task[None]] = set()
+        self._bump_intervals: dict[int, int] = {}
+        self._bump_tasks: dict[int, asyncio.Task[None]] = {}
+        self._bump_wakeups: dict[int, asyncio.Event] = {}
+        self._bump_versions: dict[int, int] = {}
         self._closing = False
 
     def get(self, guild_id: int) -> MusicPanelRecord | None:
         return self.registry.get(guild_id)
+
+    def bump_interval_minutes(self, guild_id: int) -> int:
+        """Return the process-lifetime repost interval; zero means disabled."""
+        return self._bump_intervals.get(guild_id, 0)
+
+    def set_bump_interval_minutes(self, guild_id: int, minutes: int) -> int:
+        """Store a validated interval and restart this guild's timer."""
+        if isinstance(minutes, bool) or not isinstance(minutes, int):
+            raise TypeError("panel bump interval must be an integer")
+        if minutes != 0 and not (
+            MIN_PANEL_BUMP_MINUTES <= minutes <= MAX_PANEL_BUMP_MINUTES
+        ):
+            raise ValueError("panel bump interval is outside the supported range")
+        self._bump_intervals[guild_id] = minutes
+        self._reschedule_bump(guild_id)
+        return minutes
 
     async def post_panel(
         self,
@@ -1019,12 +1090,14 @@ class MusicPanelManager:
                     voice_channel_id,
                     snapshot,
                     self.actions.ui_audio_settings(guild_id),
+                    self.bump_interval_minutes(guild_id),
                 ),
                 view=view,
             )
             record = MusicPanelRecord(
                 guild_id,
                 voice_channel_id,
+                destination,
                 message,
                 view,
                 pending_snapshot=snapshot,
@@ -1037,7 +1110,158 @@ class MusicPanelManager:
             fresh_snapshot = self.actions.ui_snapshot(guild_id)
             if fresh_snapshot != snapshot:
                 await self.refresh(guild_id, fresh_snapshot)
-            return message
+        self._reschedule_bump(guild_id)
+        return message
+
+    async def bump_panel(
+        self,
+        guild_id: int,
+        *,
+        expected_record: MusicPanelRecord | None = None,
+        expected_version: int | None = None,
+    ) -> bool:
+        """Repost the current panel at the bottom and remove the old message."""
+        lock = self._post_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            old = self.registry.get(guild_id)
+            if (
+                self._closing
+                or old is None
+                or (expected_record is not None and old is not expected_record)
+                or (
+                    expected_version is not None
+                    and self._bump_versions.get(guild_id, 0)
+                    != expected_version
+                )
+                or self.actions.ui_voice_channel_id(guild_id)
+                != old.voice_channel_id
+            ):
+                return False
+
+            snapshot = self.actions.ui_snapshot(guild_id)
+            view = MusicPanelView(
+                self.actions,
+                self,
+                guild_id,
+                old.voice_channel_id,
+                snapshot,
+            )
+            try:
+                message = await old.destination.send(
+                    embed=build_music_embed(
+                        old.voice_channel_id,
+                        snapshot,
+                        self.actions.ui_audio_settings(guild_id),
+                        self.bump_interval_minutes(guild_id),
+                    ),
+                    view=view,
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                log.warning("Could not bump music panel in guild %s", guild_id)
+                view.stop()
+                return False
+
+            replacement = MusicPanelRecord(
+                guild_id,
+                old.voice_channel_id,
+                old.destination,
+                message,
+                view,
+                pending_snapshot=snapshot,
+            )
+            # The old message may have been deleted while Discord was handling
+            # the send. Never register an orphaned replacement in that case.
+            if self.registry.get(guild_id) is not old:
+                await self._delete_record(replacement)
+                return False
+
+            view._registered = True
+            self.registry.put(replacement)
+            await self._delete_record(old)
+
+            # Preserve state changes that arrived while the new message send
+            # was in flight, just as the initial panel-post path does.
+            # Refresh unconditionally: buttons and the embed also depend on
+            # TTS/session/audio settings that can change without changing the
+            # player snapshot while Discord is sending the new message.
+            await self.refresh(guild_id, self.actions.ui_snapshot(guild_id))
+            return self.registry.get(guild_id) is replacement
+
+    def _reschedule_bump(self, guild_id: int) -> None:
+        self._bump_versions[guild_id] = self._bump_versions.get(guild_id, 0) + 1
+        wakeup = self._bump_wakeups.setdefault(guild_id, asyncio.Event())
+        wakeup.set()
+        previous = self._bump_tasks.get(guild_id)
+        if (
+            self._closing
+            or self.bump_interval_minutes(guild_id) == 0
+            or self.registry.get(guild_id) is None
+            or (previous is not None and not previous.done())
+        ):
+            return
+        task = asyncio.create_task(self._bump_loop(guild_id))
+        self._bump_tasks[guild_id] = task
+        task.add_done_callback(
+            lambda completed, target=guild_id: self._finish_bump_task(
+                target,
+                completed,
+            )
+        )
+
+    def _finish_bump_task(
+        self,
+        guild_id: int,
+        task: asyncio.Task[None],
+    ) -> None:
+        if self._bump_tasks.get(guild_id) is task:
+            self._bump_tasks.pop(guild_id, None)
+            self._bump_wakeups.pop(guild_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            log.error(
+                "Automatic music-panel bump failed in guild %s",
+                guild_id,
+                exc_info=error,
+            )
+
+    async def _bump_loop(self, guild_id: int) -> None:
+        while not self._closing:
+            minutes = self.bump_interval_minutes(guild_id)
+            record = self.registry.get(guild_id)
+            if minutes == 0 or record is None:
+                return
+            version = self._bump_versions.get(guild_id, 0)
+            wakeup = self._bump_wakeups.setdefault(guild_id, asyncio.Event())
+            wakeup.clear()
+            try:
+                await asyncio.wait_for(
+                    wakeup.wait(),
+                    timeout=minutes * 60,
+                )
+            except TimeoutError:
+                pass
+            else:
+                # A settings change or fresh manual panel restarts the full
+                # countdown without cancelling an in-flight Discord send.
+                continue
+            if self._closing or self.registry.get(guild_id) is None:
+                return
+            # A disconnected panel remains usable for reconnection, but it
+            # should not keep posting messages while its room is inactive.
+            current_record = self.registry.get(guild_id)
+            if (
+                current_record is None
+                or self.actions.ui_voice_channel_id(guild_id)
+                != current_record.voice_channel_id
+            ):
+                continue
+            await self.bump_panel(
+                guild_id,
+                expected_record=record,
+                expected_version=version,
+            )
 
     async def on_player_state_change(
         self,
@@ -1076,16 +1300,19 @@ class MusicPanelManager:
                             record.voice_channel_id,
                             current_snapshot,
                             self.actions.ui_audio_settings(guild_id),
+                            self.bump_interval_minutes(guild_id),
                         ),
                         view=record.view,
                     )
                 except (discord.NotFound, discord.Forbidden):
-                    self.registry.pop_if(guild_id, record)
+                    if self.registry.pop_if(guild_id, record):
+                        self._cancel_bump(guild_id)
                     record.view.stop()
                     return
                 except discord.HTTPException:
                     log.warning("Could not refresh music panel in guild %s", guild_id)
-                    self.registry.pop_if(guild_id, record)
+                    if self.registry.pop_if(guild_id, record):
+                        self._cancel_bump(guild_id)
                     record.view.stop()
                     return
                 record.applied_version = target_version
@@ -1108,6 +1335,7 @@ class MusicPanelManager:
             if record is None or record.voice_channel_id == voice_channel_id:
                 return False
             self.registry.pop_if(guild_id, record)
+            self._cancel_bump(guild_id)
             await self._disable_record(record)
             return True
 
@@ -1116,24 +1344,43 @@ class MusicPanelManager:
             if record.message.id == message_id:
                 dropped = self.registry.pop_if(record.guild_id, record)
                 if dropped:
+                    self._cancel_bump(record.guild_id)
                     record.view.stop()
                 return dropped
         return False
+
+    def _cancel_bump(self, guild_id: int) -> None:
+        self._bump_versions[guild_id] = self._bump_versions.get(guild_id, 0) + 1
+        wakeup = self._bump_wakeups.get(guild_id)
+        if wakeup is not None:
+            wakeup.set()
 
     async def close(self) -> None:
         self._closing = True
         records = self.registry.values()
         for record in records:
             self.registry.pop_if(record.guild_id, record)
-        tasks = tuple(self._refresh_tasks)
-        for task in tasks:
+        for wakeup in self._bump_wakeups.values():
+            wakeup.set()
+        refresh_tasks = tuple(self._refresh_tasks)
+        bump_tasks = tuple(self._bump_tasks.values())
+        self._bump_tasks.clear()
+        for task in refresh_tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if refresh_tasks:
+            await asyncio.gather(*refresh_tasks, return_exceptions=True)
+        # Let an in-flight repost finish and clean up its just-sent message.
+        # Cancelling the HTTP await could leave a live, unregistered panel if
+        # Discord accepted the send immediately before cancellation.
+        if bump_tasks:
+            await asyncio.gather(*bump_tasks, return_exceptions=True)
         await asyncio.gather(
             *(self._disable_record(record) for record in records),
             return_exceptions=True,
         )
+        self._bump_intervals.clear()
+        self._bump_wakeups.clear()
+        self._bump_versions.clear()
         self._post_locks.clear()
 
     @staticmethod
@@ -1150,6 +1397,26 @@ class MusicPanelManager:
             finally:
                 record.view.stop()
 
+    @staticmethod
+    async def _delete_record(record: MusicPanelRecord) -> None:
+        """Delete a superseded automatic-bump message, disabling on failure."""
+        async with record.lock:
+            _disable(record.view)
+            record.view.stop()
+            try:
+                await record.message.delete()
+                return
+            except discord.NotFound:
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            with contextlib.suppress(
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                await record.message.edit(view=record.view)
+
 
 __all__ = [
     "AddInputResult",
@@ -1165,4 +1432,6 @@ __all__ = [
     "SearchResultSelect",
     "SearchResultView",
     "build_music_embed",
+    "format_panel_bump_interval",
+    "parse_panel_bump_interval",
 ]

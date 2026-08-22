@@ -28,6 +28,8 @@ from ..music_ui import (
     AddInputResult,
     MusicPanelManager,
     format_audio_settings,
+    format_panel_bump_interval,
+    parse_panel_bump_interval,
 )
 from ..player import (
     ControlResult,
@@ -504,11 +506,18 @@ class MusicCog(commands.Cog, name="Music"):
         return self.settings.tts_enabled and self.sessions.is_active(guild_id)
 
     def ui_voice_connected(self, guild_id: int) -> bool:
+        return self.ui_voice_channel_id(guild_id) is not None
+
+    def ui_voice_channel_id(self, guild_id: int) -> int | None:
+        """Return the active voice room used to validate automatic bumps."""
         guild = self.bot.get_guild(guild_id)
         if guild is None:
-            return False
+            return None
         voice_client = guild.voice_client
-        return bool(voice_client and voice_client.is_connected())
+        if not voice_client or not voice_client.is_connected():
+            return None
+        channel = voice_client.channel
+        return channel.id if channel is not None else None
 
     def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings:
         """Return this guild's process-lifetime shared audio preferences."""
@@ -886,6 +895,7 @@ class MusicCog(commands.Cog, name="Music"):
         guild_id: int,
         voice_channel_id: int,
         settings: GuildAudioSettings,
+        panel_bump_minutes: int | None = None,
     ) -> str:
         """Atomically apply settings after rechecking the bound-room user."""
         async with self._operation_lock(guild_id):
@@ -897,6 +907,16 @@ class MusicCog(commands.Cog, name="Music"):
             )
             if error:
                 return error
+            if panel_bump_minutes is not None:
+                try:
+                    panel_bump_minutes = parse_panel_bump_interval(
+                        str(panel_bump_minutes)
+                    )
+                except ValueError:
+                    return (
+                        "Thời gian đưa bảng lên phải là 0 hoặc số phút "
+                        "từ 1 đến 1440."
+                    )
             if not self.settings.tts_enabled:
                 current = self.players.audio_settings(guild_id)
                 settings = GuildAudioSettings(
@@ -910,10 +930,24 @@ class MusicCog(commands.Cog, name="Music"):
                 return "Cài đặt âm thanh không hợp lệ."
             if self.settings.tts_enabled:
                 self.sessions.refresh_tts_language(guild_id)
+            if panel_bump_minutes is not None:
+                self.music_ui.set_bump_interval_minutes(
+                    guild_id,
+                    panel_bump_minutes,
+                )
 
         message = f"Đã cập nhật cài đặt: {format_audio_settings(applied)}."
+        if panel_bump_minutes is not None:
+            message += (
+                " Tự đưa bảng lên: "
+                f"{format_panel_bump_interval(panel_bump_minutes).lower()}."
+            )
         if not self.settings.tts_enabled:
-            message += " TTS đang bị tắt; chỉ âm lượng nhạc được thay đổi."
+            message += (
+                " TTS đang bị tắt; các cài đặt TTS được giữ nguyên."
+                if panel_bump_minutes is not None
+                else " TTS đang bị tắt; chỉ âm lượng nhạc được thay đổi."
+            )
         return message
 
     async def _enqueue_interaction_batch(

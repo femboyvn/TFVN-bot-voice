@@ -311,6 +311,54 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("15%", result)
         self.assertIn("en", result)
 
+    async def test_panel_audio_settings_store_bump_interval_and_report_it(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        requested = GuildAudioSettings(0.55, 0.15, "en")
+        self.players.set_audio_settings = Mock(return_value=requested)
+        self.sessions.refresh_tts_language = Mock(return_value=True)
+        self.cog.music_ui.set_bump_interval_minutes = Mock()
+
+        result = await self.cog.ui_update_audio_settings(
+            interaction,
+            1,
+            7,
+            requested,
+            15,
+        )
+
+        self.players.set_audio_settings.assert_called_once_with(1, requested)
+        self.sessions.refresh_tts_language.assert_called_once_with(1)
+        self.cog.music_ui.set_bump_interval_minutes.assert_called_once_with(
+            1,
+            15,
+        )
+        self.assertIn("tự đưa bảng lên", result.lower())
+        self.assertIn("mỗi 15 phút", result.lower())
+
+    async def test_panel_audio_settings_reject_invalid_bump_interval_atomically(
+        self,
+    ) -> None:
+        interaction = self._make_panel_interaction()
+        requested = GuildAudioSettings(0.55, 0.15, "en")
+        self.players.set_audio_settings = Mock()
+        self.sessions.refresh_tts_language = Mock()
+        self.cog.music_ui.set_bump_interval_minutes = Mock()
+
+        result = await self.cog.ui_update_audio_settings(
+            interaction,
+            1,
+            7,
+            requested,
+            1441,
+        )
+
+        self.players.set_audio_settings.assert_not_called()
+        self.sessions.refresh_tts_language.assert_not_called()
+        self.cog.music_ui.set_bump_interval_minutes.assert_not_called()
+        self.assertIn("0 hoặc số phút từ 1 đến 1440", result)
+
     async def test_panel_audio_settings_persist_without_player_or_session(
         self,
     ) -> None:
@@ -369,16 +417,19 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         interaction.user.voice.channel = outside_channel
         self.players.set_audio_settings = Mock()
         self.sessions.refresh_tts_language = Mock()
+        self.cog.music_ui.set_bump_interval_minutes = Mock()
 
         result = await self.cog.ui_update_audio_settings(
             interaction,
             1,
             7,
             GuildAudioSettings(0.5, 0.2, "vi"),
+            15,
         )
 
         self.players.set_audio_settings.assert_not_called()
         self.sessions.refresh_tts_language.assert_not_called()
+        self.cog.music_ui.set_bump_interval_minutes.assert_not_called()
         self.assertIn("đúng kênh thoại", result.lower())
 
     async def test_panel_audio_settings_reject_stale_panel_without_mutation(
@@ -392,16 +443,19 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.cog.music_ui.get = Mock(return_value=replacement)
         self.players.set_audio_settings = Mock()
         self.sessions.refresh_tts_language = Mock()
+        self.cog.music_ui.set_bump_interval_minutes = Mock()
 
         result = await self.cog.ui_update_audio_settings(
             interaction,
             1,
             7,
             GuildAudioSettings(0.5, 0.2, "vi"),
+            15,
         )
 
         self.players.set_audio_settings.assert_not_called()
         self.sessions.refresh_tts_language.assert_not_called()
+        self.cog.music_ui.set_bump_interval_minutes.assert_not_called()
         self.assertIn("thay thế", result.lower())
 
     async def test_title_reading_toggle_updates_guild_preference(self) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 
@@ -19,7 +19,9 @@ from src.music_ui import (
     SearchResultSelect,
     SearchResultView,
     build_music_embed,
+    format_panel_bump_interval,
     parse_audio_settings,
+    parse_panel_bump_interval,
 )
 from src.player import GuildAudioSettings, PlaybackState, PlayerSnapshot
 
@@ -41,6 +43,7 @@ class _Actions:
         self.title_reading = True
         self.chat_reading = False
         self.voice_connected = True
+        self.bound_voice_channel_id: int | None = 2
         self.current_audio_settings = GuildAudioSettings(0.7, 0.2, "vi")
         self.ui_ensure_panel_access = AsyncMock(return_value=True)
         self.ui_add_input = AsyncMock(return_value=AddInputResult(message="Đã thêm."))
@@ -80,6 +83,9 @@ class _Actions:
 
     def ui_voice_connected(self, guild_id: int) -> bool:
         return self.voice_connected
+
+    def ui_voice_channel_id(self, guild_id: int) -> int | None:
+        return self.bound_voice_channel_id
 
     def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings:
         return self.current_audio_settings
@@ -130,6 +136,7 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             123,
             _snapshot(),
             GuildAudioSettings(1.255, 0.2025, "zh-TW"),
+            15,
         )
 
         values = {field.name: field.value for field in embed.fields}
@@ -137,6 +144,7 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             values["Cài đặt âm thanh"],
             "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW",
         )
+        self.assertEqual(values["Tự đưa bảng lên"], "Mỗi 15 phút")
 
     def test_audio_settings_parser_accepts_locale_percentages_and_language(self) -> None:
         self.assertEqual(
@@ -157,6 +165,22 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
                     expected_message,
                 ):
                     parse_audio_settings(*values)
+
+    def test_panel_bump_interval_accepts_disabled_and_supported_bounds(self) -> None:
+        self.assertEqual(parse_panel_bump_interval(" 0 "), 0)
+        self.assertEqual(parse_panel_bump_interval("1"), 1)
+        self.assertEqual(parse_panel_bump_interval("1440"), 1440)
+        self.assertEqual(format_panel_bump_interval(0), "Tắt")
+        self.assertEqual(format_panel_bump_interval(45), "Mỗi 45 phút")
+
+    def test_panel_bump_interval_rejects_non_integer_and_out_of_range(self) -> None:
+        for value in ("", "1.5", "-1", "1441", "không"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    AudioSettingsValidationError,
+                    "0 hoặc số phút từ 1 đến 1440",
+                ):
+                    parse_panel_bump_interval(value)
 
     async def test_controls_are_state_sensitive(self) -> None:
         actions = _Actions(_snapshot())
@@ -206,7 +230,12 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             modal.children,
-            [modal.music_volume, modal.duck_level, modal.tts_language],
+            [
+                modal.music_volume,
+                modal.duck_level,
+                modal.tts_language,
+                modal.panel_bump_minutes,
+            ],
         )
 
     async def test_tts_controls_reflect_state_and_availability(self) -> None:
@@ -244,6 +273,7 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(view.leave_voice.disabled)
 
         actions.voice_connected = False
+        actions.bound_voice_channel_id = None
         view.sync(actions.current_snapshot)
 
         self.assertTrue(view.leave_voice.disabled)
@@ -269,6 +299,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         )
         self.manager = MagicMock()
         self.manager.refresh = AsyncMock()
+        self.manager.bump_interval_minutes.return_value = 15
         self.view = MusicPanelView(self.actions, self.manager, 1, 2, self.actions.current_snapshot)
 
     async def test_add_opens_modal_after_allow_disconnected_access_check(self) -> None:
@@ -298,6 +329,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modal.music_volume.default, "70")
         self.assertEqual(modal.duck_level.default, "20")
         self.assertEqual(modal.tts_language.default, "vi")
+        self.assertEqual(modal.panel_bump_minutes.default, "15")
         self.assertEqual(self.view.audio_settings.label, "Cài đặt")
         self.assertEqual(
             self.view.audio_settings.style,
@@ -356,6 +388,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         modal.music_volume._value = " 125,5% "
         modal.duck_level._value = "20.25%"
         modal.tts_language._value = " ZH_tw "
+        modal.panel_bump_minutes._value = " 45 "
         interaction = _interaction()
 
         await modal.on_submit(interaction)
@@ -372,6 +405,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             1,
             2,
             GuildAudioSettings(1.255, 0.2025, "zh-TW"),
+            45,
         )
         interaction.followup.send.assert_awaited_once_with(
             "Đã cập nhật cài đặt: Nhạc: 125.5% · "
@@ -393,9 +427,13 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         open_interaction.response.send_modal.assert_awaited_once()
         modal = open_interaction.response.send_modal.await_args.args[0]
         self.assertIsInstance(modal, AudioSettingsModal)
-        self.assertEqual(modal.children, [modal.music_volume])
+        self.assertEqual(
+            modal.children,
+            [modal.music_volume, modal.panel_bump_minutes],
+        )
         self.actions.ui_ensure_panel_access.reset_mock()
         modal.music_volume._value = "85,5%"
+        modal.panel_bump_minutes._value = "30"
         interaction = _interaction()
 
         await modal.on_submit(interaction)
@@ -412,6 +450,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             1,
             2,
             GuildAudioSettings(0.855, original.duck_level, original.tts_language),
+            30,
         )
         interaction.followup.send.assert_awaited_once_with(
             self.actions.ui_update_audio_settings.return_value,
@@ -421,11 +460,12 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_settings_modal_is_atomic_and_ephemeral(self) -> None:
         cases = (
-            ("NaN", "20", "vi", "Âm lượng nhạc"),
-            ("70", "101%", "vi", "khi TTS"),
-            ("70", "20", "không-có", "Mã ngôn ngữ TTS"),
+            ("NaN", "20", "vi", "0", "Âm lượng nhạc"),
+            ("70", "101%", "vi", "0", "khi TTS"),
+            ("70", "20", "không-có", "0", "Mã ngôn ngữ TTS"),
+            ("70", "20", "vi", "1.5", "0 hoặc số phút"),
         )
-        for music, duck, language, expected_message in cases:
+        for music, duck, language, bump_minutes, expected_message in cases:
             with self.subTest(
                 music=music,
                 duck=duck,
@@ -438,6 +478,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 modal.music_volume._value = music
                 modal.duck_level._value = duck
                 modal.tts_language._value = language
+                modal.panel_bump_minutes._value = bump_minutes
                 interaction = _interaction()
 
                 await modal.on_submit(interaction)
@@ -909,6 +950,472 @@ class PanelManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.refresh(1, _snapshot())
 
         self.assertIsNone(manager.get(1))
+
+    async def test_bump_sends_fresh_panel_before_deleting_old_message(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        events: list[str] = []
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+
+        async def delete_first() -> None:
+            events.append("delete-old")
+
+        first_message.delete = AsyncMock(side_effect=delete_first)
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        messages = iter((first_message, second_message))
+
+        async def send_panel(**kwargs: object) -> object:
+            events.append("send")
+            return next(messages)
+
+        destination = MagicMock()
+        destination.send = AsyncMock(side_effect=send_panel)
+        await manager.post_panel(destination, 1, 2)
+        old = manager.get(1)
+        events.clear()
+
+        self.assertTrue(await manager.bump_panel(1))
+
+        self.assertEqual(events, ["send", "delete-old"])
+        first_message.delete.assert_awaited_once_with()
+        first_message.edit.assert_not_awaited()
+        self.assertTrue(all(child.disabled for child in old.view.children))
+        replacement = manager.get(1)
+        self.assertIsNot(replacement, old)
+        self.assertIs(replacement.message, second_message)
+        self.assertTrue(replacement.view._registered)
+        second_message.edit.assert_awaited_once()
+        await manager.close()
+
+    async def test_bump_skips_disconnected_panel_without_posting(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+        original = manager.get(1)
+        destination.send.reset_mock()
+        actions.voice_connected = False
+        actions.bound_voice_channel_id = None
+
+        self.assertFalse(await manager.bump_panel(1))
+
+        destination.send.assert_not_awaited()
+        message.delete.assert_not_awaited()
+        self.assertIs(manager.get(1), original)
+        await manager.close()
+
+    async def test_bump_skips_panel_connected_to_a_different_voice_room(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+        original = manager.get(1)
+        destination.send.reset_mock()
+        actions.bound_voice_channel_id = 3
+
+        self.assertFalse(await manager.bump_panel(1))
+
+        destination.send.assert_not_awaited()
+        message.delete.assert_not_awaited()
+        self.assertIs(manager.get(1), original)
+        await manager.close()
+
+    async def test_bump_send_failure_preserves_working_old_panel(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        message.delete = AsyncMock()
+        response = MagicMock()
+        response.status = 500
+        response.reason = "Server Error"
+        destination = MagicMock()
+        destination.send = AsyncMock(
+            side_effect=(
+                message,
+                discord.HTTPException(response, "failed"),
+            )
+        )
+        await manager.post_panel(destination, 1, 2)
+        original = manager.get(1)
+
+        self.assertFalse(await manager.bump_panel(1))
+
+        self.assertIs(manager.get(1), original)
+        message.delete.assert_not_awaited()
+        self.assertFalse(original.view.add_music.disabled)
+        await manager.close()
+
+    async def test_bump_disables_old_controls_when_old_delete_fails(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        response = MagicMock()
+        response.status = 500
+        response.reason = "Server Error"
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock(
+            side_effect=discord.HTTPException(response, "failed")
+        )
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(side_effect=(first_message, second_message))
+        await manager.post_panel(destination, 1, 2)
+        old = manager.get(1)
+
+        self.assertTrue(await manager.bump_panel(1))
+
+        first_message.delete.assert_awaited_once_with()
+        first_message.edit.assert_awaited_once_with(view=old.view)
+        self.assertTrue(all(child.disabled for child in old.view.children))
+        self.assertIs(manager.get(1).message, second_message)
+        await manager.close()
+
+    async def test_raw_delete_during_bump_send_deletes_orphan_replacement(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock()
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        send_started = asyncio.Event()
+        allow_send = asyncio.Event()
+
+        async def blocked_send(**kwargs: object) -> object:
+            send_started.set()
+            await allow_send.wait()
+            return second_message
+
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=first_message)
+        await manager.post_panel(destination, 1, 2)
+        destination.send = AsyncMock(side_effect=blocked_send)
+
+        bumping = asyncio.create_task(manager.bump_panel(1))
+        await asyncio.wait_for(send_started.wait(), timeout=0.5)
+        self.assertTrue(manager.drop_message(100))
+        allow_send.set()
+
+        self.assertFalse(await asyncio.wait_for(bumping, timeout=0.5))
+        self.assertIsNone(manager.get(1))
+        second_message.delete.assert_awaited_once_with()
+        first_message.delete.assert_not_awaited()
+        await manager.close()
+
+    async def test_bump_refreshes_settings_changed_during_send(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock()
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        send_started = asyncio.Event()
+        allow_send = asyncio.Event()
+
+        async def blocked_send(**kwargs: object) -> object:
+            send_started.set()
+            await allow_send.wait()
+            return second_message
+
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=first_message)
+        await manager.post_panel(destination, 1, 2)
+        destination.send = AsyncMock(side_effect=blocked_send)
+
+        bumping = asyncio.create_task(manager.bump_panel(1))
+        await asyncio.wait_for(send_started.wait(), timeout=0.5)
+        actions.current_audio_settings = GuildAudioSettings(1.1, 0.4, "ja")
+        actions.title_reading = False
+        actions.chat_reading = True
+        allow_send.set()
+
+        self.assertTrue(await asyncio.wait_for(bumping, timeout=0.5))
+        edited_embed = second_message.edit.await_args.kwargs["embed"]
+        values = {field.name: field.value for field in edited_embed.fields}
+        self.assertEqual(
+            values["Cài đặt âm thanh"],
+            "Nhạc: 110% · Nhạc còn lại khi TTS: 40% · TTS: ja",
+        )
+        replacement = manager.get(1)
+        self.assertEqual(replacement.view.toggle_title_reading.label, "Đọc tên bài: Tắt")
+        self.assertEqual(replacement.view.toggle_chat_reading.label, "Đọc tin nhắn: Bật")
+        await manager.close()
+
+    async def test_bump_timer_uses_minutes_and_reposts_periodically(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock()
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(side_effect=(first_message, second_message))
+        await manager.post_panel(destination, 1, 2)
+
+        real_wait_for = asyncio.wait_for
+        timeouts: list[float] = []
+        bump_completed = asyncio.Event()
+
+        async def expire_countdown(awaitable: object, *, timeout: float) -> None:
+            timeouts.append(timeout)
+            awaitable.close()
+            raise TimeoutError
+
+        async def finish_bump(**kwargs: object) -> None:
+            manager.set_bump_interval_minutes(1, 0)
+            bump_completed.set()
+
+        second_message.edit = AsyncMock(side_effect=finish_bump)
+        with patch(
+            "src.music_ui.asyncio.wait_for",
+            side_effect=expire_countdown,
+        ):
+            manager.set_bump_interval_minutes(1, 1)
+            await real_wait_for(bump_completed.wait(), timeout=0.5)
+
+        self.assertEqual(timeouts, [60])
+        self.assertIs(manager.get(1).message, second_message)
+        first_message.delete.assert_awaited_once_with()
+        second_message.edit.assert_awaited_once()
+        self.assertEqual(manager.bump_interval_minutes(1), 0)
+        await manager.close()
+
+    async def test_reconfiguring_bump_interval_restarts_countdown(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+
+        real_wait_for = asyncio.wait_for
+        countdowns: list[float] = []
+        first_countdown = asyncio.Event()
+        second_countdown = asyncio.Event()
+
+        async def wait_for_wakeup(awaitable: object, *, timeout: float) -> None:
+            countdowns.append(timeout)
+            if len(countdowns) == 1:
+                first_countdown.set()
+            else:
+                second_countdown.set()
+            await awaitable
+
+        with patch(
+            "src.music_ui.asyncio.wait_for",
+            side_effect=wait_for_wakeup,
+        ):
+            manager.set_bump_interval_minutes(1, 5)
+            await real_wait_for(first_countdown.wait(), timeout=0.5)
+            manager.set_bump_interval_minutes(1, 10)
+            await real_wait_for(second_countdown.wait(), timeout=0.5)
+            manager.set_bump_interval_minutes(1, 0)
+            await manager.close()
+
+        self.assertEqual(countdowns, [300, 600])
+        self.assertEqual(destination.send.await_count, 1)
+        self.assertEqual(manager.bump_interval_minutes(1), 0)
+
+    async def test_interval_change_at_timeout_boundary_prevents_old_countdown_bump(
+        self,
+    ) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock()
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(side_effect=(first_message, second_message))
+        await manager.post_panel(destination, 1, 2)
+
+        real_wait_for = asyncio.wait_for
+        first_countdown = asyncio.Event()
+        release_expired_countdown = asyncio.Event()
+        restarted_countdown = asyncio.Event()
+        countdowns: list[float] = []
+
+        async def boundary_wait(awaitable: object, *, timeout: float) -> None:
+            countdowns.append(timeout)
+            if len(countdowns) == 1:
+                first_countdown.set()
+                await release_expired_countdown.wait()
+                awaitable.close()
+                raise TimeoutError
+            restarted_countdown.set()
+            await awaitable
+
+        with patch("src.music_ui.asyncio.wait_for", side_effect=boundary_wait):
+            manager.set_bump_interval_minutes(1, 5)
+            await real_wait_for(first_countdown.wait(), timeout=0.5)
+            manager.set_bump_interval_minutes(1, 10)
+            release_expired_countdown.set()
+            await real_wait_for(restarted_countdown.wait(), timeout=0.5)
+            manager.set_bump_interval_minutes(1, 0)
+            await manager.close()
+
+        self.assertEqual(countdowns, [300, 600])
+        self.assertEqual(destination.send.await_count, 1)
+
+    async def test_manual_replacement_at_timeout_boundary_restarts_countdown(
+        self,
+    ) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        first_message = MagicMock()
+        first_message.id = 100
+        first_message.edit = AsyncMock()
+        first_message.delete = AsyncMock()
+        second_message = MagicMock()
+        second_message.id = 101
+        second_message.edit = AsyncMock()
+        second_message.delete = AsyncMock()
+        automatic_message = MagicMock()
+        automatic_message.id = 102
+        automatic_message.edit = AsyncMock()
+        automatic_message.delete = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(
+            side_effect=(first_message, second_message, automatic_message)
+        )
+        await manager.post_panel(destination, 1, 2)
+
+        real_wait_for = asyncio.wait_for
+        first_countdown = asyncio.Event()
+        release_expired_countdown = asyncio.Event()
+        restarted_countdown = asyncio.Event()
+        countdowns: list[float] = []
+
+        async def boundary_wait(awaitable: object, *, timeout: float) -> None:
+            countdowns.append(timeout)
+            if len(countdowns) == 1:
+                first_countdown.set()
+                await release_expired_countdown.wait()
+                awaitable.close()
+                raise TimeoutError
+            restarted_countdown.set()
+            await awaitable
+
+        with patch("src.music_ui.asyncio.wait_for", side_effect=boundary_wait):
+            manager.set_bump_interval_minutes(1, 5)
+            await real_wait_for(first_countdown.wait(), timeout=0.5)
+            await manager.post_panel(destination, 1, 2)
+            release_expired_countdown.set()
+            await real_wait_for(restarted_countdown.wait(), timeout=0.5)
+            self.assertIs(manager.get(1).message, second_message)
+            manager.set_bump_interval_minutes(1, 0)
+            await manager.close()
+
+        self.assertEqual(countdowns, [300, 300])
+        self.assertEqual(destination.send.await_count, 2)
+
+    async def test_bump_interval_setter_rejects_invalid_values(self) -> None:
+        manager = MusicPanelManager(_Actions(_snapshot()))
+
+        for value in (True, 1.5, "5"):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    manager.set_bump_interval_minutes(1, value)
+        for value in (-1, 1441):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    manager.set_bump_interval_minutes(1, value)
+
+        self.assertEqual(manager.bump_interval_minutes(1), 0)
+        await manager.close()
+
+    async def test_drop_message_stops_future_automatic_bumps(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+        real_wait_for = asyncio.wait_for
+        countdown_started = asyncio.Event()
+
+        async def wait_for_wakeup(awaitable: object, *, timeout: float) -> None:
+            countdown_started.set()
+            await awaitable
+
+        with patch(
+            "src.music_ui.asyncio.wait_for",
+            side_effect=wait_for_wakeup,
+        ):
+            manager.set_bump_interval_minutes(1, 1)
+            await real_wait_for(countdown_started.wait(), timeout=0.5)
+            self.assertTrue(manager.drop_message(100))
+            await manager.close()
+
+        self.assertIsNone(manager.get(1))
+        self.assertEqual(destination.send.await_count, 1)
+
+    async def test_close_stops_timer_and_clears_runtime_interval(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        destination = MagicMock()
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+        real_wait_for = asyncio.wait_for
+        countdown_started = asyncio.Event()
+
+        async def wait_for_wakeup(awaitable: object, *, timeout: float) -> None:
+            countdown_started.set()
+            await awaitable
+
+        with patch(
+            "src.music_ui.asyncio.wait_for",
+            side_effect=wait_for_wakeup,
+        ):
+            manager.set_bump_interval_minutes(1, 1)
+            await real_wait_for(countdown_started.wait(), timeout=0.5)
+            await manager.close()
+
+        self.assertIsNone(manager.get(1))
+        self.assertEqual(manager.bump_interval_minutes(1), 0)
+        self.assertEqual(destination.send.await_count, 1)
 
 
 if __name__ == "__main__":
