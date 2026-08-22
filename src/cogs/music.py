@@ -565,7 +565,7 @@ class MusicCog(commands.Cog, name="Music"):
                 if not results:
                     return AddInputResult(message="Không tìm thấy kết quả.")
                 return AddInputResult(
-                    message="Chọn một kết quả để thêm vào hàng đợi:",
+                    message="Chọn nút số tương ứng để thêm vào hàng đợi:",
                     results=tuple(results),
                 )
 

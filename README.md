@@ -52,8 +52,9 @@ The default prefix is `!tfd `, including the trailing space.
 ### Shared music panel
 
 1. Join a voice channel and run `!tfd music`.
-2. Use **Thêm nhạc** to enter a search phrase, media URL, or YouTube playlist URL.
-   Search phrases show five private results; selecting one appends it to the queue.
+2. Use **Tìm bài** to enter a search phrase, video URL, or YouTube playlist URL.
+   Plain queries show up to five ephemeral numbered results; press the matching
+   **1**–**5** button to append one to the queue.
 3. A playlist appends its available videos in order, inspecting at most the first 25
    entries per request. Unavailable entries are skipped.
 4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,

@@ -356,69 +356,28 @@ class _RequesterView(discord.ui.View):
                 await self.message.edit(view=self)
 
 
-class SearchResultSelect(discord.ui.Select):
-    """Single-choice YouTube result selector."""
+class SearchResultButton(discord.ui.Button):
+    """Numbered button mapped to one result in its requester-only view."""
 
-    def __init__(self, results: Sequence[SearchResult]) -> None:
-        self.results = tuple(results[:5])
-        options = []
-        for index, result in enumerate(self.results):
-            duration = format_duration(result.duration)
-            options.append(
-                discord.SelectOption(
-                    label=result.title[:100] or "Không có tiêu đề",
-                    value=str(index),
-                    description=(duration or "YouTube")[:100],
-                )
-            )
+    def __init__(self, result_index: int) -> None:
         super().__init__(
-            placeholder="Chọn một bài để thêm",
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="music:search-result",
+            label=str(result_index + 1),
+            style=discord.ButtonStyle.primary,
+            custom_id=f"music:search-result:{result_index}",
+            row=0,
         )
+        self.result_index = result_index
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.view
         if not isinstance(view, SearchResultView):
             await _send_ephemeral(interaction, "Kết quả tìm kiếm đã hết hạn.")
             return
-        try:
-            result = self.results[int(self.values[0])]
-        except (IndexError, TypeError, ValueError):
-            await _send_ephemeral(interaction, "Kết quả tìm kiếm không còn hợp lệ.")
-            return
-        allowed = await view.ensure_access(interaction)
-        if not allowed:
-            return
-        if not await view.consume():
-            await _send_ephemeral(interaction, "Kết quả này đã được sử dụng.")
-            return
-
-        # Claim the requester-only result before the first network await after
-        # access validation. Discord can deliver two rapid select interactions
-        # before the disabled component edit reaches the client.
-        view.stop()
-        _disable(view)
-        # A component update defer keeps the ephemeral result message as the
-        # original response, so edit_original_response below disables this
-        # selector rather than editing a separate "thinking" response.
-        await interaction.response.defer(ephemeral=True)
-        message = await view.actions.ui_enqueue_search_result(
-            interaction,
-            view.guild_id,
-            view.voice_channel_id,
-            result,
-        )
-        with contextlib.suppress(discord.HTTPException):
-            await interaction.edit_original_response(view=view)
-        await interaction.followup.send(message, ephemeral=True)
-        await view.manager.refresh(view.guild_id)
+        await view.select_result(interaction, self.result_index)
 
 
 class SearchResultView(_RequesterView):
-    """Requester-bound, expiring list of five YouTube search results."""
+    """Requester-bound numbered buttons for up to five YouTube results."""
 
     def __init__(
         self,
@@ -437,9 +396,76 @@ class SearchResultView(_RequesterView):
         self.guild_id = guild_id
         self.voice_channel_id = voice_channel_id
         self.panel_view = panel_view
+        self.results = tuple(results[:5])
         self._consume_lock = asyncio.Lock()
         self._consumed = False
-        self.add_item(SearchResultSelect(results))
+        for index in range(len(self.results)):
+            self.add_item(SearchResultButton(index))
+
+    def render_embed(self) -> discord.Embed:
+        """Show the exact numbered mapping used by the result buttons."""
+        lines: list[str] = []
+        for index, result in enumerate(self.results, 1):
+            raw_title = result.title.strip() or "Không có tiêu đề"
+            title = discord.utils.escape_markdown(raw_title)
+            if len(title) > 180:
+                title = f"{title[:179]}…"
+            url = result.url
+            rendered = (
+                f"[{title}](<{url}>)"
+                if isinstance(url, str) and url and len(url) <= 300
+                else title
+            )
+            duration = format_duration(result.duration)
+            lines.append(
+                f"**{index}.** {rendered}{f' · {duration}' if duration else ''}"
+            )
+        embed = discord.Embed(
+            title="Kết quả tìm kiếm YouTube",
+            description="\n".join(lines) or "Không tìm thấy kết quả.",
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Bấm nút số tương ứng để thêm bài vào hàng đợi.")
+        return embed
+
+    async def select_result(
+        self,
+        interaction: discord.Interaction,
+        result_index: int,
+    ) -> None:
+        try:
+            if not isinstance(result_index, int) or result_index < 0:
+                raise IndexError
+            result = self.results[result_index]
+        except (IndexError, TypeError):
+            await _send_ephemeral(interaction, "Kết quả tìm kiếm không còn hợp lệ.")
+            return
+        allowed = await self.ensure_access(interaction)
+        if not allowed:
+            return
+        if not await self.consume():
+            await _send_ephemeral(interaction, "Kết quả này đã được sử dụng.")
+            return
+
+        # Claim the requester-only result before the first network await after
+        # access validation. Discord can deliver two rapid button interactions
+        # before the disabled component edit reaches the client.
+        self.stop()
+        _disable(self)
+        # A component update defer keeps the ephemeral result message as the
+        # original response, so edit_original_response below disables this
+        # result view rather than editing a separate "thinking" response.
+        await interaction.response.defer(ephemeral=True)
+        message = await self.actions.ui_enqueue_search_result(
+            interaction,
+            self.guild_id,
+            self.voice_channel_id,
+            result,
+        )
+        with contextlib.suppress(discord.HTTPException):
+            await interaction.edit_original_response(view=self)
+        await interaction.followup.send(message, ephemeral=True)
+        await self.manager.refresh(self.guild_id)
 
     async def consume(self) -> bool:
         """Atomically reserve this one-shot result view."""
@@ -463,7 +489,7 @@ class SearchResultView(_RequesterView):
         )
 
 
-class AddMusicModal(discord.ui.Modal, title="Thêm nhạc"):
+class AddMusicModal(discord.ui.Modal, title="Tìm / thêm nhạc"):
     query = discord.ui.TextInput(
         label="Tên bài, URL video hoặc playlist YouTube",
         placeholder="Nhập nội dung tìm kiếm hoặc dán liên kết…",
@@ -524,8 +550,9 @@ class AddMusicModal(discord.ui.Modal, title="Thêm nhạc"):
                 panel_view=self.panel_view,
             )
             message = await interaction.followup.send(
-                result.message or "Chọn một kết quả để thêm vào hàng đợi:",
+                result.message or "Chọn nút số tương ứng để thêm vào hàng đợi:",
                 view=view,
+                embed=view.render_embed(),
                 ephemeral=True,
                 wait=True,
             )
@@ -854,7 +881,7 @@ class MusicPanelView(discord.ui.View):
         await interaction.followup.send(message, ephemeral=True)
         await self.manager.refresh(self.guild_id)
 
-    @discord.ui.button(label="Thêm nhạc", emoji="➕", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Tìm bài", emoji="🔎", style=discord.ButtonStyle.success, row=0)
     async def add_music(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await self.ensure_access(interaction, connect_if_missing=True):
             return
@@ -1429,7 +1456,7 @@ __all__ = [
     "MusicPanelView",
     "MusicUIActions",
     "QueuePaginatorView",
-    "SearchResultSelect",
+    "SearchResultButton",
     "SearchResultView",
     "build_music_embed",
     "format_panel_bump_interval",

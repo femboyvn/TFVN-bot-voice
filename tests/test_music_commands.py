@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
 
-from src.media import MediaBatch, QueuedTrack
+from src.media import MediaBatch, MediaExtractionError, QueuedTrack, SearchResult
 from src.cogs.music import MusicCog
 from src.music_ui import PANEL_INTERACTION_TOKEN
 from src.player import GuildAudioSettings, JumpResult
@@ -860,6 +860,75 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
                 await adding
 
         self.assertIn("thay thế", result.message)
+        self.players.get_or_create.assert_not_awaited()
+
+    async def test_ui_add_input_plain_query_returns_ordered_numbered_results(
+        self,
+    ) -> None:
+        expected = [
+            SearchResult("Bài một", "https://www.youtube.com/watch?v=one", 60),
+            SearchResult("Bài hai", "https://www.youtube.com/watch?v=two", 120),
+            SearchResult("Bài ba", "https://www.youtube.com/watch?v=three", 180),
+        ]
+        self.media.search = AsyncMock(return_value=expected)
+        self.media.prepare = AsyncMock()
+        self.players.get_or_create = AsyncMock()
+        self.cog._enqueue_interaction_batch = AsyncMock()
+        interaction = self._make_panel_interaction()
+
+        result = await self.cog.ui_add_input(
+            interaction,
+            1,
+            7,
+            "  bài thử  ",
+        )
+
+        self.media.search.assert_awaited_once_with("bài thử", limit=5)
+        self.assertEqual(
+            result.message,
+            "Chọn nút số tương ứng để thêm vào hàng đợi:",
+        )
+        self.assertEqual(result.results, tuple(expected))
+        self.media.prepare.assert_not_awaited()
+        self.cog._enqueue_interaction_batch.assert_not_awaited()
+        self.players.get_or_create.assert_not_awaited()
+
+    async def test_ui_add_input_plain_query_handles_empty_results_without_enqueue(
+        self,
+    ) -> None:
+        self.media.search = AsyncMock(return_value=[])
+        self.media.prepare = AsyncMock()
+        self.players.get_or_create = AsyncMock()
+        self.cog._enqueue_interaction_batch = AsyncMock()
+        interaction = self._make_panel_interaction()
+
+        result = await self.cog.ui_add_input(interaction, 1, 7, "không có bài")
+
+        self.media.search.assert_awaited_once_with("không có bài", limit=5)
+        self.assertEqual(result.message, "Không tìm thấy kết quả.")
+        self.assertEqual(result.results, ())
+        self.media.prepare.assert_not_awaited()
+        self.cog._enqueue_interaction_batch.assert_not_awaited()
+        self.players.get_or_create.assert_not_awaited()
+
+    async def test_ui_add_input_plain_query_handles_extraction_failure_without_enqueue(
+        self,
+    ) -> None:
+        self.media.search = AsyncMock(
+            side_effect=MediaExtractionError("Tìm kiếm YouTube thất bại")
+        )
+        self.media.prepare = AsyncMock()
+        self.players.get_or_create = AsyncMock()
+        self.cog._enqueue_interaction_batch = AsyncMock()
+        interaction = self._make_panel_interaction()
+
+        result = await self.cog.ui_add_input(interaction, 1, 7, "bài bị lỗi")
+
+        self.media.search.assert_awaited_once_with("bài bị lỗi", limit=5)
+        self.assertEqual(result.message, "Tìm kiếm YouTube thất bại")
+        self.assertEqual(result.results, ())
+        self.media.prepare.assert_not_awaited()
+        self.cog._enqueue_interaction_batch.assert_not_awaited()
         self.players.get_or_create.assert_not_awaited()
 
     async def test_enqueue_uses_batch_playlist_path(self) -> None:

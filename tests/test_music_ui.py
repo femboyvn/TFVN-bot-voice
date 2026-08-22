@@ -16,7 +16,7 @@ from src.music_ui import (
     MusicPanelManager,
     MusicPanelView,
     QueuePaginatorView,
-    SearchResultSelect,
+    SearchResultButton,
     SearchResultView,
     build_music_embed,
     format_panel_bump_interval,
@@ -187,6 +187,8 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         manager = MagicMock()
         idle = MusicPanelView(actions, manager, 1, 2, actions.current_snapshot)
         self.assertFalse(idle.add_music.disabled)
+        self.assertEqual(idle.add_music.label, "Tìm bài")
+        self.assertEqual(str(idle.add_music.emoji), "🔎")
         self.assertTrue(idle.pause_resume.disabled)
         self.assertTrue(idle.show_queue.disabled)
         self.assertTrue(idle.stop_music.disabled)
@@ -309,7 +311,27 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             interaction, 1, 2, connect_if_missing=True
         )
         interaction.response.send_modal.assert_awaited_once()
-        self.assertIsInstance(interaction.response.send_modal.await_args.args[0], AddMusicModal)
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, AddMusicModal)
+        self.assertEqual(modal.title, "Tìm / thêm nhạc")
+
+    async def test_add_modal_rejects_empty_query_ephemerally(self) -> None:
+        modal = AddMusicModal(self.actions, self.manager, 1, 2)
+        modal.query._value = "   "
+        interaction = _interaction(10)
+
+        await modal.on_submit(interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "Vui lòng nhập tên bài hát hoặc URL.",
+            view=None,
+            embed=None,
+            ephemeral=True,
+        )
+        interaction.response.defer.assert_not_awaited()
+        self.actions.ui_ensure_panel_access.assert_not_awaited()
+        self.actions.ui_add_input.assert_not_awaited()
+        self.manager.refresh.assert_not_awaited()
 
     async def test_settings_button_opens_prefilled_modal_for_disconnected_access(self) -> None:
         interaction = _interaction()
@@ -650,34 +672,82 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         outsider.response.send_message.assert_awaited()
         self.assertTrue(await view.interaction_check(_interaction(10)))
 
+    async def test_search_results_use_numbered_buttons_and_embed_caps_at_five(
+        self,
+    ) -> None:
+        results = tuple(
+            SearchResult(
+                f"Bài {index}",
+                f"https://youtube.test/{index}",
+                index * 61,
+            )
+            for index in range(1, 7)
+        )
+
+        view = SearchResultView(self.actions, self.manager, 1, 2, 10, results)
+        buttons = [
+            child for child in view.children if isinstance(child, SearchResultButton)
+        ]
+        embed = view.render_embed()
+
+        self.assertEqual([button.label for button in buttons], ["1", "2", "3", "4", "5"])
+        self.assertEqual(
+            [button.custom_id for button in buttons],
+            [f"music:search-result:{index}" for index in range(5)],
+        )
+        self.assertEqual([button.result_index for button in buttons], list(range(5)))
+        self.assertTrue(all(button.row == 0 for button in buttons))
+        self.assertEqual(view.results, results[:5])
+        self.assertEqual(embed.title, "Kết quả tìm kiếm YouTube")
+        self.assertIn("**1.** [Bài 1]", embed.description)
+        self.assertIn("· 1:01", embed.description)
+        self.assertIn("**5.** [Bài 5]", embed.description)
+        self.assertNotIn("Bài 6", embed.description)
+        self.assertIn("nút số", embed.footer.text)
+
     async def test_search_selection_enqueues_only_selected_result(self) -> None:
         results = (
             SearchResult("Một", "https://youtube.test/one", 10),
             SearchResult("Hai", "https://youtube.test/two", 20),
         )
         view = SearchResultView(self.actions, self.manager, 1, 2, 10, results)
-        select = next(child for child in view.children if isinstance(child, SearchResultSelect))
-        select._values = ["1"]
+        buttons = [
+            child for child in view.children if isinstance(child, SearchResultButton)
+        ]
         interaction = _interaction(10)
 
-        await select.callback(interaction)
+        await buttons[1].callback(interaction)
 
         self.actions.ui_enqueue_search_result.assert_awaited_once_with(
             interaction, 1, 2, results[1]
         )
-        interaction.response.defer.assert_awaited_once()
-
-    async def test_search_result_view_accepts_only_one_rapid_selection(self) -> None:
-        result = SearchResult("Kết quả", "https://youtube.test/result", 10)
-        view = SearchResultView(self.actions, self.manager, 1, 2, 10, (result,))
-        select = next(
-            child for child in view.children if isinstance(child, SearchResultSelect)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.assertTrue(all(button.disabled for button in buttons))
+        interaction.edit_original_response.assert_awaited_once_with(view=view)
+        interaction.followup.send.assert_awaited_once_with(
+            "Đã thêm.",
+            ephemeral=True,
         )
-        select._values = ["0"]
+        self.manager.refresh.assert_awaited_once_with(1)
+
+    async def test_search_result_view_accepts_only_one_rapid_number_button(
+        self,
+    ) -> None:
+        results = (
+            SearchResult("Một", "https://youtube.test/one", 10),
+            SearchResult("Hai", "https://youtube.test/two", 20),
+        )
+        view = SearchResultView(self.actions, self.manager, 1, 2, 10, results)
+        buttons = [
+            child for child in view.children if isinstance(child, SearchResultButton)
+        ]
         first = _interaction(10)
         second = _interaction(10)
 
-        await asyncio.gather(select.callback(first), select.callback(second))
+        await asyncio.gather(
+            buttons[0].callback(first),
+            buttons[1].callback(second),
+        )
 
         self.actions.ui_enqueue_search_result.assert_awaited_once()
         accepted = [
@@ -700,6 +770,48 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(child.disabled for child in view.children))
 
+    async def test_denied_search_result_click_does_not_consume_view(self) -> None:
+        result = SearchResult("Kết quả", "https://youtube.test/result", 10)
+        view = SearchResultView(self.actions, self.manager, 1, 2, 10, (result,))
+        button = next(
+            child for child in view.children if isinstance(child, SearchResultButton)
+        )
+        denied = _interaction(10)
+        self.actions.ui_ensure_panel_access.return_value = False
+
+        await button.callback(denied)
+
+        self.actions.ui_enqueue_search_result.assert_not_awaited()
+        denied.response.defer.assert_not_awaited()
+        self.assertFalse(view._consumed)
+        self.assertFalse(button.disabled)
+
+        self.actions.ui_ensure_panel_access.return_value = True
+        allowed = _interaction(10)
+        await button.callback(allowed)
+
+        self.actions.ui_enqueue_search_result.assert_awaited_once_with(
+            allowed,
+            1,
+            2,
+            result,
+        )
+
+    async def test_search_result_timeout_disables_number_buttons(self) -> None:
+        results = (
+            SearchResult("Một", "https://youtube.test/one", 10),
+            SearchResult("Hai", "https://youtube.test/two", 20),
+        )
+        view = SearchResultView(self.actions, self.manager, 1, 2, 10, results)
+        message = MagicMock()
+        message.edit = AsyncMock()
+        view.message = message
+
+        await view.on_timeout()
+
+        self.assertTrue(all(child.disabled for child in view.children))
+        message.edit.assert_awaited_once_with(view=view)
+
     async def test_search_selection_from_replaced_panel_is_stale(self) -> None:
         self.view._registered = True
         replacement = MagicMock()
@@ -715,13 +827,12 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             (result,),
             panel_view=self.view,
         )
-        select = next(
-            child for child in view.children if isinstance(child, SearchResultSelect)
+        button = next(
+            child for child in view.children if isinstance(child, SearchResultButton)
         )
-        select._values = ["0"]
         interaction = _interaction(10)
 
-        await select.callback(interaction)
+        await button.callback(interaction)
 
         self.actions.ui_enqueue_search_result.assert_not_awaited()
         self.actions.ui_ensure_panel_access.assert_not_awaited()
@@ -746,6 +857,15 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         sent_view = interaction.followup.send.await_args_list[0].kwargs["view"]
         self.assertIsInstance(sent_view, SearchResultView)
         self.assertEqual(sent_view.requester_id, 10)
+        sent_embed = interaction.followup.send.await_args_list[0].kwargs["embed"]
+        self.assertEqual(sent_embed.title, "Kết quả tìm kiếm YouTube")
+        self.assertIn("**1.** [Kết quả]", sent_embed.description)
+        self.assertEqual(
+            interaction.followup.send.await_args_list[0].args[0],
+            "Chọn nút số tương ứng để thêm vào hàng đợi:",
+        )
+        self.assertTrue(interaction.followup.send.await_args_list[0].kwargs["ephemeral"])
+        self.assertTrue(interaction.followup.send.await_args_list[0].kwargs["wait"])
 
     async def test_clear_confirmation_is_requester_bound_and_thirty_seconds(self) -> None:
         view = ClearQueueConfirmation(self.view, 10)
