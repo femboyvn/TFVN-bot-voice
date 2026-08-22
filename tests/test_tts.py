@@ -8,7 +8,12 @@ from unittest.mock import patch
 
 import discord
 
-from src.tts import TTSError, TextToSpeech, now_playing_speech
+from src.tts import (
+    TTSError,
+    TextToSpeech,
+    normalize_tts_language,
+    now_playing_speech,
+)
 
 
 class _FakeAudioSource(discord.AudioSource):
@@ -98,6 +103,32 @@ class TextToSpeechTests(unittest.TestCase):
                 self.tts.create_audio_source("Hello", volume=0.7)
         # No leftover temp files under the tfd-tts prefix should remain owned by us;
         # synthesize creates then unlinks on FFmpeg failure.
+
+    def test_with_language_clones_service_without_mutating_original(self) -> None:
+        clone = self.tts.with_language("vi")
+
+        self.assertIsNot(clone, self.tts)
+        self.assertEqual(self.tts.lang, "en")
+        self.assertEqual(clone.lang, "vi")
+        self.assertIs(clone._synthesizer, self.tts._synthesizer)
+
+        path = clone.synthesize("xin chào")
+        try:
+            self.assertIn("xin chào".encode("utf-8"), path.read_bytes())
+        finally:
+            path.unlink(missing_ok=True)
+
+
+class TTSLanguageTests(unittest.TestCase):
+    def test_normalizes_whitespace_case_and_ietf_separator(self) -> None:
+        self.assertEqual(normalize_tts_language(" VI "), "vi")
+        self.assertEqual(normalize_tts_language("zh_cn"), "zh-CN")
+
+    def test_rejects_empty_and_unsupported_language(self) -> None:
+        for value in ("", "   ", "not-a-language"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    normalize_tts_language(value)
 
 
 class TextToSpeechDefaultBackendTests(unittest.TestCase):

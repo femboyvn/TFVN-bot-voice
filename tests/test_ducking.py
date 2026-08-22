@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import threading
 import unittest
 
 import discord
@@ -48,6 +49,17 @@ class _ConstantSource(discord.AudioSource):
         if not self._chunks:
             return b""
         return self._chunks.pop(0)
+
+    def cleanup(self) -> None:
+        return None
+
+
+class _RepeatingSource(discord.AudioSource):
+    def __init__(self, chunk: bytes) -> None:
+        self.chunk = chunk
+
+    def read(self) -> bytes:
+        return self.chunk
 
     def cleanup(self) -> None:
         return None
@@ -118,6 +130,64 @@ class DuckingAudioSourceTests(unittest.TestCase):
         resumed = mixer.read()
         self.assertEqual(struct.unpack("<h", resumed[:2])[0], 1000)
         self.assertEqual(len(primary._chunks), 2)
+
+    def test_live_volume_and_duck_updates_change_active_mix(self) -> None:
+        primary = discord.PCMVolumeTransformer(
+            _ConstantSource([_frame_from_sample(10000, 4)] * 2),
+            volume=0.5,
+        )
+        mixer = DuckingAudioSource(primary, duck_level=0.2)
+        mixer.inject_secondary(
+            _ConstantSource([_frame_from_sample(0, 4)] * 2)
+        )
+
+        first = struct.unpack("<h", mixer.read()[:2])[0]
+        self.assertEqual(first, 1000)
+
+        self.assertTrue(mixer.set_primary_volume(1.0))
+        mixer.set_duck_level(0.5)
+        second = struct.unpack("<h", mixer.read()[:2])[0]
+        self.assertEqual(second, 5000)
+
+    def test_live_updates_are_safe_during_audio_thread_reads(self) -> None:
+        primary = discord.PCMVolumeTransformer(
+            _RepeatingSource(_frame_from_sample(10000, 4)),
+            volume=0.5,
+        )
+        mixer = DuckingAudioSource(primary, duck_level=0.2)
+        mixer.inject_secondary(_RepeatingSource(_frame_from_sample(0, 4)))
+        failures: list[BaseException] = []
+
+        def update_settings() -> None:
+            try:
+                for index in range(500):
+                    mixer.set_primary_volume(1.0 if index % 2 else 0.5)
+                    mixer.set_duck_level(0.8 if index % 2 else 0.2)
+            except BaseException as exc:  # pragma: no cover - assertion below
+                failures.append(exc)
+
+        updater = threading.Thread(target=update_settings)
+        updater.start()
+        samples = [struct.unpack("<h", mixer.read()[:2])[0] for _ in range(500)]
+        updater.join(timeout=2.0)
+
+        self.assertFalse(updater.is_alive())
+        self.assertEqual(failures, [])
+        self.assertTrue(samples)
+        self.assertTrue(all(0 <= sample <= 8000 for sample in samples))
+
+    def test_live_update_validation_and_non_transformer_result(self) -> None:
+        mixer = DuckingAudioSource(_RepeatingSource(_frame_from_sample(1)))
+
+        self.assertFalse(mixer.set_primary_volume(0.5))
+        for invalid in (-0.1, 2.1):
+            with self.subTest(volume=invalid):
+                with self.assertRaises(ValueError):
+                    mixer.set_primary_volume(invalid)
+        for invalid in (-0.1, 1.1):
+            with self.subTest(duck_level=invalid):
+                with self.assertRaises(ValueError):
+                    mixer.set_duck_level(invalid)
 
 
 if __name__ == "__main__":

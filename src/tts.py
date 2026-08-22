@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
 
 import discord
@@ -39,6 +40,28 @@ Synthesizer = Callable[[str, Path], None]
 
 class TTSError(RuntimeError):
     """Raised when speech cannot be synthesized into playable audio."""
+
+
+@lru_cache(maxsize=1)
+def supported_tts_languages() -> dict[str, str]:
+    """Return the locally available gTTS language-code mapping."""
+    from gtts.lang import tts_langs
+
+    return dict(tts_langs())
+
+
+def normalize_tts_language(value: str) -> str:
+    """Normalize a user-supplied language code to gTTS's canonical spelling."""
+    candidate = value.strip().replace("_", "-")
+    if not candidate:
+        raise ValueError("TTS language must be non-empty")
+    by_casefold = {
+        code.casefold(): code for code in supported_tts_languages()
+    }
+    try:
+        return by_casefold[candidate.casefold()]
+    except KeyError as exc:
+        raise ValueError(f"unsupported TTS language: {value}") from exc
 
 
 def now_playing_speech(title: str) -> str:
@@ -70,6 +93,15 @@ class TextToSpeech:
     ) -> None:
         self.lang = lang
         self._synthesizer = synthesizer
+
+    def with_language(self, lang: str) -> TextToSpeech:
+        """Create an isolated service using *lang* and the same backend.
+
+        Runtime guild settings use separate instances instead of mutating the
+        bot-wide default. An in-flight synthesis can therefore finish with its
+        captured language while later speech switches safely.
+        """
+        return TextToSpeech(lang=lang, synthesizer=self._synthesizer)
 
     def synthesize(self, text: str) -> Path:
         """Turn non-empty *text* into a temporary audio file.

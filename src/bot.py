@@ -12,7 +12,7 @@ from .config import Settings
 from .media import MediaService
 from .player import PlayerManager
 from .session import SessionManager
-from .tts import TextToSpeech
+from .tts import TextToSpeech, normalize_tts_language
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class VoiceBot(commands.Bot):
 
         self.settings = settings
         self.media = MediaService()
-        self.tts = TextToSpeech(lang=settings.tts_lang)
+        self.tts = TextToSpeech(lang=normalize_tts_language(settings.tts_lang))
         self.sessions = SessionManager(
             self,
             self.tts,

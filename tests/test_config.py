@@ -41,6 +41,25 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.tts_lang, "vi")
         self.assertEqual(settings.music_duck_level, 0.15)
 
+    def test_canonicalizes_tts_language_code(self) -> None:
+        settings = Settings.from_env(
+            {
+                "DISCORD_TOKEN": "secret",
+                "TTS_LANG": " zh_cn ",
+            }
+        )
+
+        self.assertEqual(settings.tts_lang, "zh-CN")
+
+    def test_rejects_unsupported_tts_language_code(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "TTS_LANG"):
+            Settings.from_env(
+                {
+                    "DISCORD_TOKEN": "secret",
+                    "TTS_LANG": "not-a-language",
+                }
+            )
+
     def test_requires_token(self) -> None:
         with self.assertRaisesRegex(ConfigurationError, "DISCORD_TOKEN"):
             Settings.from_env({})

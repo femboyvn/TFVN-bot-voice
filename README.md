@@ -57,17 +57,37 @@ The default prefix is `!tfd `, including the trailing space.
 3. A playlist appends its available videos in order, inspecting at most the first 25
    entries per request. Unavailable entries are skipped.
 4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
-   timestamp jump, queue view, clear queue, stop, **Đọc tên bài**, and
-   **Đọc tin nhắn**. Members outside that channel, including administrators, cannot
-   use these controls or move the bot.
+   timestamp jump, queue view, clear queue, stop, **Đọc tên bài**,
+   **Đọc tin nhắn**, **Cài đặt**, and **Rời**. Members outside that channel,
+   including administrators, cannot use these controls or move the bot.
 5. The public panel shows the current track and the next five queued tracks. Search
    results, queue pages, confirmations, and errors are visible only to the requester.
 6. **Đọc tên bài** toggles the spoken song-title announcement; the text
    **Đang phát** announcement is still posted when speech is off. **Đọc tin nhắn**
-   starts or stops reading the voice channel's text chat without stopping music.
-   A phrase already being spoken may finish after either control is turned off.
+   starts or stops reading the voice channel's text chat without stopping music or
+   making the bot leave voice. **Rời** is the explicit action that stops music,
+   clears the queue, turns off chat reading, and disconnects. A phrase already being
+   spoken may finish after either reading control is turned off.
+7. **Cài đặt** opens a private form for the room's shared runtime audio settings:
+   music volume accepts `0`–`200` percent; music level while TTS is speaking accepts
+   `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction);
+   and TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
+   or `ko`.
 
-Both speech controls are unavailable when `TTS_ENABLED=false`.
+Audio settings are shared per Discord server, not per user, and changing them from
+the panel affects current and future playback in that server. Music volume and the
+TTS duck level update an active music mixer immediately. A language change is used
+by subsequent song-title and chat messages, including an already-active chat-reading
+session; audio that has already started speaking may finish in the old language.
+Music volume controls the music track only and does not change TTS loudness.
+
+Runtime audio settings are kept in memory. They reset to `DEFAULT_VOLUME`,
+`MUSIC_DUCK_LEVEL`, and `TTS_LANG` from the environment whenever the bot process
+restarts; no database persistence is performed.
+
+Both speech controls are unavailable when `TTS_ENABLED=false`. In that mode,
+**Cài đặt** still allows music-volume changes, while the inactive TTS fields are hidden
+and left unchanged.
 
 Only one panel is active per Discord server during the current process. Opening a new
 panel disables the old one.

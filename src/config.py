@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
+from .tts import normalize_tts_language
+
 
 class ConfigurationError(ValueError):
     """Raised when required application configuration is invalid."""
@@ -71,6 +73,14 @@ class Settings:
         if not token:
             raise ConfigurationError("DISCORD_TOKEN is required")
 
+        raw_tts_lang = environment.get("TTS_LANG", "vi").strip() or "vi"
+        try:
+            tts_lang = normalize_tts_language(raw_tts_lang)
+        except ValueError as exc:
+            raise ConfigurationError(
+                "TTS_LANG must be a supported gTTS language code"
+            ) from exc
+
         settings = cls(
             discord_token=token,
             command_prefix=environment.get("COMMAND_PREFIX", "!tfd "),
@@ -82,7 +92,7 @@ class Settings:
             voice_connect_retries=_read_int(environment, "VOICE_CONNECT_RETRIES", 3),
             player_idle_timeout=_read_float(environment, "PLAYER_IDLE_TIMEOUT", 300.0),
             tts_enabled=_read_bool(environment, "TTS_ENABLED", True),
-            tts_lang=environment.get("TTS_LANG", "vi").strip() or "vi",
+            tts_lang=tts_lang,
             music_duck_level=_read_float(environment, "MUSIC_DUCK_LEVEL", 0.2),
         )
         settings._validate()
@@ -101,5 +111,11 @@ class Settings:
             raise ConfigurationError("PLAYER_IDLE_TIMEOUT must be positive")
         if not self.tts_lang:
             raise ConfigurationError("TTS_LANG cannot be empty")
+        try:
+            normalize_tts_language(self.tts_lang)
+        except ValueError as exc:
+            raise ConfigurationError(
+                "TTS_LANG must be a supported gTTS language code"
+            ) from exc
         if not 0.0 <= self.music_duck_level <= 1.0:
             raise ConfigurationError("MUSIC_DUCK_LEVEL must be between 0 and 1")

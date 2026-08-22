@@ -396,16 +396,33 @@ class SessionManager:
             return existing
 
         players = self.players
+        guild_tts = (
+            players.tts_for_guild(guild.id)
+            if players is not None
+            else None
+        )
         session = VoiceSession(
             self.bot,
             guild,
             voice_channel,
-            self.tts,
+            guild_tts or self.tts,
             volume=self.volume,
             get_player=(players.get if players is not None else None),
         )
         self._sessions[guild.id] = session
         return session
+
+    def refresh_tts_language(self, guild_id: int) -> bool:
+        """Apply the current guild language to an already-running session."""
+        session = self._sessions.get(guild_id)
+        players = self.players
+        if session is None or not session.active or players is None:
+            return False
+        tts = players.tts_for_guild(guild_id)
+        if tts is None:
+            return False
+        session.tts = tts
+        return True
 
     async def stop(self, guild_id: int) -> bool:
         session = self._sessions.pop(guild_id, None)

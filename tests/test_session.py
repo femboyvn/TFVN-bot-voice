@@ -6,6 +6,7 @@ import asyncio
 import unittest
 from unittest.mock import Mock
 
+from src.player import GuildAudioSettings, PlayerManager
 from src.session import (
     SessionManager,
     VoiceSession,
@@ -202,6 +203,63 @@ class VoiceSessionOfferTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_and_new_sessions_use_isolated_guild_languages(self) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        base_tts = TextToSpeech(
+            lang="vi",
+            synthesizer=lambda t, p: p.write_bytes(b"x" * 8),
+        )
+        players = PlayerManager(
+            bot,
+            Mock(),
+            volume=0.7,
+            idle_timeout=10.0,
+            tts=base_tts,
+            duck_level=0.2,
+        )
+        manager = SessionManager(bot, base_tts, volume=0.7, players=players)
+        guild_one = Mock()
+        guild_one.id = 301
+        guild_two = Mock()
+        guild_two.id = 302
+        channel_one = Mock()
+        channel_one.id = 1
+        channel_one.name = "One"
+        channel_two = Mock()
+        channel_two.id = 2
+        channel_two.name = "Two"
+
+        players.set_audio_settings(
+            guild_one.id,
+            GuildAudioSettings(0.7, 0.2, "EN"),
+        )
+        first = manager.start(guild_one, channel_one)
+        second = manager.start(guild_two, channel_two)
+        try:
+            self.assertEqual(first.tts.lang, "en")
+            self.assertEqual(second.tts.lang, "vi")
+            self.assertIsNot(first.tts, second.tts)
+            self.assertEqual(base_tts.lang, "vi")
+
+            players.set_audio_settings(
+                guild_one.id,
+                GuildAudioSettings(0.7, 0.2, "ja"),
+            )
+            self.assertTrue(manager.refresh_tts_language(guild_one.id))
+            self.assertEqual(first.tts.lang, "ja")
+            self.assertEqual(second.tts.lang, "vi")
+            self.assertEqual(base_tts.lang, "vi")
+        finally:
+            await manager.stop(guild_one.id)
+            await manager.stop(guild_two.id)
+
+        replacement = manager.start(guild_one, channel_one)
+        try:
+            self.assertEqual(replacement.tts.lang, "ja")
+        finally:
+            await manager.stop(guild_one.id)
+
     async def test_start_stop_and_keep_connected(self) -> None:
         bot = Mock()
         bot.loop = asyncio.get_running_loop()

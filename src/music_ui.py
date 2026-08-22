@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 import discord
 
 from .media import SearchResult, format_duration, parse_jump_timestamp
-from .player import PlaybackState, PlayerSnapshot
+from .player import GuildAudioSettings, PlaybackState, PlayerSnapshot
+from .tts import normalize_tts_language
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +26,62 @@ SEARCH_VIEW_TIMEOUT = 120.0
 CLEAR_CONFIRM_TIMEOUT = 30.0
 QUEUE_PAGE_SIZE = 10
 PANEL_INTERACTION_TOKEN = "tfd_music_panel_view"
+
+
+class AudioSettingsValidationError(ValueError):
+    """A requester-facing validation failure for the settings modal."""
+
+
+def _parse_percentage(value: str, *, maximum: float, error: str) -> float:
+    normalized = value.strip()
+    if normalized.endswith("%"):
+        normalized = normalized[:-1].strip()
+    normalized = normalized.replace(",", ".")
+    try:
+        percentage = float(normalized)
+    except ValueError as exc:
+        raise AudioSettingsValidationError(error) from exc
+    if not math.isfinite(percentage) or not 0.0 <= percentage <= maximum:
+        raise AudioSettingsValidationError(error)
+    return percentage / 100.0
+
+
+def parse_audio_settings(
+    music_volume: str,
+    duck_level: str,
+    tts_language: str,
+) -> GuildAudioSettings:
+    """Validate all modal fields and return one atomic runtime snapshot."""
+    volume = _parse_percentage(
+        music_volume,
+        maximum=200.0,
+        error="Âm lượng nhạc phải là số từ 0 đến 200.",
+    )
+    duck = _parse_percentage(
+        duck_level,
+        maximum=100.0,
+        error="Âm lượng nhạc khi TTS phải là số từ 0 đến 100.",
+    )
+    try:
+        language = normalize_tts_language(tts_language)
+    except ValueError as exc:
+        raise AudioSettingsValidationError(
+            "Mã ngôn ngữ TTS không được hỗ trợ. Ví dụ: vi, en, ja, ko."
+        ) from exc
+    return GuildAudioSettings(volume, duck, language)
+
+
+def _format_percentage(value: float) -> str:
+    return f"{value * 100:.2f}".rstrip("0").rstrip(".")
+
+
+def format_audio_settings(settings: GuildAudioSettings) -> str:
+    """Render shared audio settings for embeds and confirmations."""
+    return (
+        f"Nhạc: {_format_percentage(settings.music_volume)}% · "
+        f"Nhạc còn lại khi TTS: {_format_percentage(settings.duck_level)}% · "
+        f"TTS: {settings.tts_language}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +101,8 @@ class MusicUIActions(Protocol):
 
     ``ui_ensure_panel_access`` sends its own ephemeral denial when returning
     ``False``. ``connect_if_missing=True`` means a disconnected bound-room user
-    may continue; actual reconnection happens inside ``add_input`` or
-    ``enqueue_search_result`` after the interaction has been deferred.
+    may continue; actual reconnection happens inside actions such as adding
+    music or enabling chat reading after the interaction has been deferred.
     """
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None: ...
@@ -54,6 +112,10 @@ class MusicUIActions(Protocol):
     def ui_title_reading_enabled(self, guild_id: int) -> bool: ...
 
     def ui_chat_reading_enabled(self, guild_id: int) -> bool: ...
+
+    def ui_voice_connected(self, guild_id: int) -> bool: ...
+
+    def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings: ...
 
     async def ui_ensure_panel_access(
         self,
@@ -120,6 +182,18 @@ class MusicUIActions(Protocol):
         self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
     ) -> str: ...
 
+    async def ui_leave(
+        self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_update_audio_settings(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        settings: GuildAudioSettings,
+    ) -> str: ...
+
 
 def _track_title(track: object, *, maximum: int = 180) -> str:
     title = discord.utils.escape_markdown(str(getattr(track, "title", "Không có tiêu đề")))
@@ -157,6 +231,7 @@ def _state_text(state: PlaybackState) -> str:
 def build_music_embed(
     voice_channel_id: int,
     snapshot: PlayerSnapshot | None,
+    audio_settings: GuildAudioSettings | None = None,
 ) -> discord.Embed:
     """Render the public panel state from an immutable player snapshot."""
     state = snapshot.state if snapshot is not None else PlaybackState.IDLE
@@ -183,6 +258,12 @@ def build_music_embed(
         inline=True,
     )
     embed.add_field(name="Đang chờ", value=str(len(queued)), inline=True)
+    if audio_settings is not None:
+        embed.add_field(
+            name="Cài đặt âm thanh",
+            value=format_audio_settings(audio_settings),
+            inline=False,
+        )
     next_tracks = "\n".join(_track_line(track, index) for index, track in enumerate(queued[:5], 1))
     embed.add_field(name="Tiếp theo", value=next_tracks or "Hàng đợi trống.", inline=False)
     embed.set_footer(text="Mọi thành viên trong kênh thoại đều có thể điều khiển.")
@@ -454,6 +535,80 @@ class JumpModal(discord.ui.Modal, title="Tua đến"):
         await view.manager.refresh(view.guild_id)
 
 
+class AudioSettingsModal(discord.ui.Modal, title="Cài đặt âm thanh"):
+    music_volume = discord.ui.TextInput(
+        label="Âm lượng nhạc (%)",
+        placeholder="0–200; ví dụ: 70",
+        required=True,
+        max_length=16,
+    )
+    duck_level = discord.ui.TextInput(
+        label="Âm lượng nhạc khi TTS (%)",
+        placeholder="0–100; 20 nghĩa là còn 20%",
+        required=True,
+        max_length=16,
+    )
+    tts_language = discord.ui.TextInput(
+        label="Ngôn ngữ TTS",
+        placeholder="Ví dụ: vi, en, ja, ko",
+        required=True,
+        max_length=20,
+    )
+
+    def __init__(
+        self,
+        view: MusicPanelView,
+        settings: GuildAudioSettings,
+        *,
+        tts_available: bool = True,
+    ) -> None:
+        super().__init__(timeout=SEARCH_VIEW_TIMEOUT)
+        self.panel_view = view
+        self.current_settings = settings
+        self.tts_available = tts_available
+        self.music_volume.default = _format_percentage(settings.music_volume)
+        self.duck_level.default = _format_percentage(settings.duck_level)
+        self.tts_language.default = settings.tts_language
+        if not tts_available:
+            self.remove_item(self.duck_level)
+            self.remove_item(self.tts_language)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        view = self.panel_view
+        if not await view.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if self.tts_available:
+                settings = parse_audio_settings(
+                    str(self.music_volume),
+                    str(self.duck_level),
+                    str(self.tts_language),
+                )
+            else:
+                settings = GuildAudioSettings(
+                    music_volume=_parse_percentage(
+                        str(self.music_volume),
+                        maximum=200.0,
+                        error="Âm lượng nhạc phải là số từ 0 đến 200.",
+                    ),
+                    duck_level=self.current_settings.duck_level,
+                    tts_language=self.current_settings.tts_language,
+                )
+        except AudioSettingsValidationError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+
+        message = await view.actions.ui_update_audio_settings(
+            interaction,
+            view.guild_id,
+            view.voice_channel_id,
+            settings,
+        )
+        await interaction.followup.send(message, ephemeral=True)
+        await view.manager.refresh(view.guild_id)
+
+
 class QueuePaginatorView(_RequesterView):
     """Static requester-only pages of ten queued tracks."""
 
@@ -606,6 +761,7 @@ class MusicPanelView(discord.ui.View):
             else discord.ButtonStyle.secondary
         )
         self.toggle_chat_reading.disabled = not self.actions.ui_tts_available()
+        self.leave_voice.disabled = not self.actions.ui_voice_connected(self.guild_id)
 
     async def ensure_access(
         self,
@@ -753,6 +909,40 @@ class MusicPanelView(discord.ui.View):
             connect_if_missing=True,
         )
 
+    @discord.ui.button(
+        label="Cài đặt",
+        emoji="⚙️",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def audio_settings(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not await self.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.send_modal(
+            AudioSettingsModal(
+                self,
+                self.actions.ui_audio_settings(self.guild_id),
+                tts_available=self.actions.ui_tts_available(),
+            )
+        )
+
+    @discord.ui.button(
+        label="Rời",
+        emoji="🚪",
+        style=discord.ButtonStyle.danger,
+        row=2,
+    )
+    async def leave_voice(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._run(interaction, "leave")
+
 
 @dataclass(slots=True)
 class MusicPanelRecord:
@@ -825,7 +1015,11 @@ class MusicPanelManager:
             snapshot = self.actions.ui_snapshot(guild_id)
             view = MusicPanelView(self.actions, self, guild_id, voice_channel_id, snapshot)
             message = await destination.send(
-                embed=build_music_embed(voice_channel_id, snapshot),
+                embed=build_music_embed(
+                    voice_channel_id,
+                    snapshot,
+                    self.actions.ui_audio_settings(guild_id),
+                ),
                 view=view,
             )
             record = MusicPanelRecord(
@@ -878,7 +1072,11 @@ class MusicPanelManager:
                 record.view.sync(current_snapshot)
                 try:
                     await record.message.edit(
-                        embed=build_music_embed(record.voice_channel_id, current_snapshot),
+                        embed=build_music_embed(
+                            record.voice_channel_id,
+                            current_snapshot,
+                            self.actions.ui_audio_settings(guild_id),
+                        ),
                         view=record.view,
                     )
                 except (discord.NotFound, discord.Forbidden):

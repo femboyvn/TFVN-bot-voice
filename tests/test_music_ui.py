@@ -10,6 +10,8 @@ from src.media import QueuedTrack, SearchResult
 from src.music_ui import (
     AddInputResult,
     AddMusicModal,
+    AudioSettingsModal,
+    AudioSettingsValidationError,
     ClearQueueConfirmation,
     MusicPanelManager,
     MusicPanelView,
@@ -17,8 +19,9 @@ from src.music_ui import (
     SearchResultSelect,
     SearchResultView,
     build_music_embed,
+    parse_audio_settings,
 )
-from src.player import PlaybackState, PlayerSnapshot
+from src.player import GuildAudioSettings, PlaybackState, PlayerSnapshot
 
 
 def _snapshot(
@@ -37,6 +40,8 @@ class _Actions:
         self.tts_available = True
         self.title_reading = True
         self.chat_reading = False
+        self.voice_connected = True
+        self.current_audio_settings = GuildAudioSettings(0.7, 0.2, "vi")
         self.ui_ensure_panel_access = AsyncMock(return_value=True)
         self.ui_add_input = AsyncMock(return_value=AddInputResult(message="Đã thêm."))
         self.ui_enqueue_search_result = AsyncMock(return_value="Đã thêm.")
@@ -47,11 +52,18 @@ class _Actions:
         self.ui_jump = AsyncMock(return_value="Đã tua.")
         self.ui_clear_queue = AsyncMock(return_value="Đã xóa.")
         self.ui_stop = AsyncMock(return_value="Đã dừng.")
+        self.ui_leave = AsyncMock(return_value="Đã rời kênh thoại.")
         self.ui_toggle_title_reading = AsyncMock(
             return_value="Đã tắt đọc tên bài."
         )
         self.ui_toggle_chat_reading = AsyncMock(
             return_value="Đã bật đọc tin nhắn."
+        )
+        self.ui_update_audio_settings = AsyncMock(
+            return_value=(
+                "Đã cập nhật cài đặt: Nhạc: 125.5% · "
+                "Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW."
+            )
         )
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None:
@@ -65,6 +77,12 @@ class _Actions:
 
     def ui_chat_reading_enabled(self, guild_id: int) -> bool:
         return self.chat_reading
+
+    def ui_voice_connected(self, guild_id: int) -> bool:
+        return self.voice_connected
+
+    def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings:
+        return self.current_audio_settings
 
 
 def _interaction(user_id: int = 10) -> MagicMock:
@@ -107,6 +125,39 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Bài 5", values["Tiếp theo"])
         self.assertNotIn("Bài 6", values["Tiếp theo"])
 
+    def test_embed_shows_public_audio_settings(self) -> None:
+        embed = build_music_embed(
+            123,
+            _snapshot(),
+            GuildAudioSettings(1.255, 0.2025, "zh-TW"),
+        )
+
+        values = {field.name: field.value for field in embed.fields}
+        self.assertEqual(
+            values["Cài đặt âm thanh"],
+            "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW",
+        )
+
+    def test_audio_settings_parser_accepts_locale_percentages_and_language(self) -> None:
+        self.assertEqual(
+            parse_audio_settings(" 125,5% ", "20.25%", " ZH_tw "),
+            GuildAudioSettings(1.255, 0.2025, "zh-TW"),
+        )
+
+    def test_audio_settings_parser_rejects_each_invalid_field(self) -> None:
+        cases = (
+            (("NaN", "20", "vi"), "Âm lượng nhạc"),
+            (("70", "101", "vi"), "khi TTS"),
+            (("70", "20", "không-có"), "Mã ngôn ngữ TTS"),
+        )
+        for values, expected_message in cases:
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(
+                    AudioSettingsValidationError,
+                    expected_message,
+                ):
+                    parse_audio_settings(*values)
+
     async def test_controls_are_state_sensitive(self) -> None:
         actions = _Actions(_snapshot())
         manager = MagicMock()
@@ -137,6 +188,27 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(idle.next_track.disabled)
         self.assertTrue(idle.pause_resume.disabled)
 
+    async def test_panel_rows_and_enabled_settings_modal_fit_discord_limits(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+
+        controls_per_row = {
+            row: sum(child.row == row for child in view.children)
+            for row in range(3)
+        }
+        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4})
+        self.assertEqual(len(view.children), 12)
+
+        modal = AudioSettingsModal(
+            view,
+            actions.current_audio_settings,
+            tts_available=True,
+        )
+        self.assertEqual(
+            modal.children,
+            [modal.music_volume, modal.duck_level, modal.tts_language],
+        )
+
     async def test_tts_controls_reflect_state_and_availability(self) -> None:
         actions = _Actions(_snapshot())
         view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
@@ -162,6 +234,19 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(view.toggle_title_reading.disabled)
         self.assertTrue(view.toggle_chat_reading.disabled)
+
+    async def test_leave_control_reflects_voice_connection(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+
+        self.assertEqual(view.leave_voice.label, "Rời")
+        self.assertEqual(view.leave_voice.style, discord.ButtonStyle.danger)
+        self.assertFalse(view.leave_voice.disabled)
+
+        actions.voice_connected = False
+        view.sync(actions.current_snapshot)
+
+        self.assertTrue(view.leave_voice.disabled)
 
     async def test_queue_paginator_uses_ten_items_per_page(self) -> None:
         queued = tuple(
@@ -194,6 +279,179 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         )
         interaction.response.send_modal.assert_awaited_once()
         self.assertIsInstance(interaction.response.send_modal.await_args.args[0], AddMusicModal)
+
+    async def test_settings_button_opens_prefilled_modal_for_disconnected_access(self) -> None:
+        interaction = _interaction()
+
+        await self.view.audio_settings.callback(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=True,
+        )
+        interaction.response.send_modal.assert_awaited_once()
+        modal = interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, AudioSettingsModal)
+        self.assertEqual(modal.timeout, 120.0)
+        self.assertEqual(modal.music_volume.default, "70")
+        self.assertEqual(modal.duck_level.default, "20")
+        self.assertEqual(modal.tts_language.default, "vi")
+        self.assertEqual(self.view.audio_settings.label, "Cài đặt")
+        self.assertEqual(
+            self.view.audio_settings.style,
+            discord.ButtonStyle.secondary,
+        )
+
+    async def test_settings_button_denial_does_not_open_modal(self) -> None:
+        self.actions.ui_ensure_panel_access.return_value = False
+        interaction = _interaction()
+
+        await self.view.audio_settings.callback(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=True,
+        )
+        interaction.response.send_modal.assert_not_awaited()
+        interaction.response.defer.assert_not_awaited()
+        self.actions.ui_update_audio_settings.assert_not_awaited()
+
+    async def test_settings_modal_rejects_replaced_registered_panel_before_defer(
+        self,
+    ) -> None:
+        modal = AudioSettingsModal(
+            self.view,
+            self.actions.current_audio_settings,
+        )
+        self.view._registered = True
+        replacement = MagicMock()
+        replacement.view = MagicMock()
+        self.manager.get.return_value = replacement
+        interaction = _interaction()
+
+        await modal.on_submit(interaction)
+
+        interaction.response.send_message.assert_awaited_once()
+        self.assertIn(
+            "thay thế",
+            interaction.response.send_message.await_args.args[0],
+        )
+        self.assertTrue(
+            interaction.response.send_message.await_args.kwargs["ephemeral"]
+        )
+        interaction.response.defer.assert_not_awaited()
+        self.actions.ui_ensure_panel_access.assert_not_awaited()
+        self.actions.ui_update_audio_settings.assert_not_awaited()
+        self.manager.refresh.assert_not_awaited()
+
+    async def test_settings_modal_submits_normalized_values_ephemerally(self) -> None:
+        modal = AudioSettingsModal(
+            self.view,
+            self.actions.current_audio_settings,
+        )
+        modal.music_volume._value = " 125,5% "
+        modal.duck_level._value = "20.25%"
+        modal.tts_language._value = " ZH_tw "
+        interaction = _interaction()
+
+        await modal.on_submit(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=True,
+        )
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.actions.ui_update_audio_settings.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            GuildAudioSettings(1.255, 0.2025, "zh-TW"),
+        )
+        interaction.followup.send.assert_awaited_once_with(
+            "Đã cập nhật cài đặt: Nhạc: 125.5% · "
+            "Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW.",
+            ephemeral=True,
+        )
+        self.manager.refresh.assert_awaited_once_with(1)
+
+    async def test_tts_unavailable_modal_updates_only_music_and_preserves_tts_settings(
+        self,
+    ) -> None:
+        original = GuildAudioSettings(0.7, 0.2, "vi")
+        self.actions.current_audio_settings = original
+        self.actions.tts_available = False
+        open_interaction = _interaction()
+
+        await self.view.audio_settings.callback(open_interaction)
+
+        open_interaction.response.send_modal.assert_awaited_once()
+        modal = open_interaction.response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, AudioSettingsModal)
+        self.assertEqual(modal.children, [modal.music_volume])
+        self.actions.ui_ensure_panel_access.reset_mock()
+        modal.music_volume._value = "85,5%"
+        interaction = _interaction()
+
+        await modal.on_submit(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=True,
+        )
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        self.actions.ui_update_audio_settings.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            GuildAudioSettings(0.855, original.duck_level, original.tts_language),
+        )
+        interaction.followup.send.assert_awaited_once_with(
+            self.actions.ui_update_audio_settings.return_value,
+            ephemeral=True,
+        )
+        self.manager.refresh.assert_awaited_once_with(1)
+
+    async def test_invalid_settings_modal_is_atomic_and_ephemeral(self) -> None:
+        cases = (
+            ("NaN", "20", "vi", "Âm lượng nhạc"),
+            ("70", "101%", "vi", "khi TTS"),
+            ("70", "20", "không-có", "Mã ngôn ngữ TTS"),
+        )
+        for music, duck, language, expected_message in cases:
+            with self.subTest(
+                music=music,
+                duck=duck,
+                language=language,
+            ):
+                modal = AudioSettingsModal(
+                    self.view,
+                    self.actions.current_audio_settings,
+                )
+                modal.music_volume._value = music
+                modal.duck_level._value = duck
+                modal.tts_language._value = language
+                interaction = _interaction()
+
+                await modal.on_submit(interaction)
+
+                interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+                self.actions.ui_update_audio_settings.assert_not_awaited()
+                self.manager.refresh.assert_not_awaited()
+                interaction.followup.send.assert_awaited_once()
+                error_call = interaction.followup.send.await_args
+                self.assertIn(expected_message, error_call.args[0])
+                self.assertTrue(error_call.kwargs["ephemeral"])
+
+                self.actions.ui_ensure_panel_access.reset_mock()
+                self.manager.refresh.reset_mock()
 
     async def test_pause_defers_and_delegates_to_action(self) -> None:
         interaction = _interaction()
@@ -266,6 +524,42 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 self.manager.refresh.assert_not_awaited()
 
                 self.actions.ui_ensure_panel_access.reset_mock()
+
+    async def test_leave_uses_connected_access_and_delegates_ephemerally(self) -> None:
+        interaction = _interaction()
+
+        await self.view.leave_voice.callback(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=False,
+        )
+        self.actions.ui_leave.assert_awaited_once_with(interaction, 1, 2)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        interaction.followup.send.assert_awaited_once_with(
+            "Đã rời kênh thoại.",
+            ephemeral=True,
+        )
+        self.manager.refresh.assert_awaited_once_with(1)
+
+    async def test_leave_denial_stops_before_action_or_defer(self) -> None:
+        self.actions.ui_ensure_panel_access.return_value = False
+        interaction = _interaction()
+
+        await self.view.leave_voice.callback(interaction)
+
+        self.actions.ui_ensure_panel_access.assert_awaited_once_with(
+            interaction,
+            1,
+            2,
+            connect_if_missing=False,
+        )
+        self.actions.ui_leave.assert_not_awaited()
+        interaction.response.defer.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+        self.manager.refresh.assert_not_awaited()
 
     async def test_outside_room_stops_before_control(self) -> None:
         self.actions.ui_ensure_panel_access.return_value = False

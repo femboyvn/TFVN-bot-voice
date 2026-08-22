@@ -13,6 +13,7 @@ from src.ducking import DuckingAudioSource
 from src.media import MediaExtractionError, QueuedTrack, Track
 from src.player import (
     ControlResult,
+    GuildAudioSettings,
     GuildPlayer,
     JumpResult,
     PlaybackState,
@@ -1163,6 +1164,119 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_settings_defaults_are_isolated_and_survive_recreate(
+        self,
+    ) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        base_tts = TextToSpeech(lang="vi", synthesizer=_write_fake_mp3)
+        manager = PlayerManager(
+            bot,
+            Mock(),
+            volume=0.5,
+            idle_timeout=10.0,
+            tts=base_tts,
+            duck_level=0.2,
+        )
+        guild = Mock()
+        guild.id = 201
+        guild.voice_client = None
+
+        self.assertEqual(
+            manager.audio_settings(201),
+            GuildAudioSettings(0.5, 0.2, "vi"),
+        )
+        self.assertEqual(
+            manager.audio_settings(202),
+            GuildAudioSettings(0.5, 0.2, "vi"),
+        )
+
+        applied = manager.set_audio_settings(
+            201,
+            GuildAudioSettings(0.9, 0.4, " EN "),
+        )
+        self.assertEqual(applied, GuildAudioSettings(0.9, 0.4, "en"))
+        self.assertEqual(manager.audio_settings(201), applied)
+        self.assertEqual(
+            manager.audio_settings(202),
+            GuildAudioSettings(0.5, 0.2, "vi"),
+        )
+
+        player = await manager.get_or_create(guild)
+        self.assertEqual(player.music_volume, 0.9)
+        self.assertEqual(player.duck_level, 0.4)
+        self.assertEqual(player.tts_volume, 0.5)
+        self.assertIsNot(player.tts, base_tts)
+        self.assertEqual(player.tts.lang, "en")
+
+        self.assertTrue(await manager.remove(201, disconnect=False))
+        recreated = await manager.get_or_create(guild)
+        self.assertIsNot(recreated, player)
+        self.assertEqual(recreated.music_volume, 0.9)
+        self.assertEqual(recreated.duck_level, 0.4)
+        self.assertEqual(recreated.tts_volume, 0.5)
+        self.assertEqual(recreated.tts.lang, "en")
+        await manager.remove(201, disconnect=False)
+
+    async def test_audio_settings_propagate_to_live_player_without_tts_gain(self) -> None:
+        base_tts = TextToSpeech(lang="vi", synthesizer=_write_fake_mp3)
+        manager = PlayerManager(
+            Mock(),
+            Mock(),
+            volume=0.6,
+            idle_timeout=10.0,
+            tts=base_tts,
+            duck_level=0.2,
+        )
+        player = object.__new__(GuildPlayer)
+        player.music_volume = 0.6
+        player.tts_volume = 0.6
+        player.duck_level = 0.2
+        player.tts = base_tts
+        player._mixer = Mock(spec=DuckingAudioSource)
+        manager._players[203] = player
+
+        applied = manager.set_audio_settings(
+            203,
+            GuildAudioSettings(1.1, 0.35, "zh_cn"),
+        )
+
+        self.assertEqual(applied, GuildAudioSettings(1.1, 0.35, "zh-CN"))
+        self.assertEqual(player.music_volume, 1.1)
+        self.assertEqual(player.duck_level, 0.35)
+        self.assertEqual(player.tts_volume, 0.6)
+        self.assertEqual(player.tts.lang, "zh-CN")
+        self.assertIsNot(player.tts, base_tts)
+        player._mixer.set_primary_volume.assert_called_once_with(1.1)
+        player._mixer.set_duck_level.assert_called_once_with(0.35)
+
+    async def test_audio_settings_reject_invalid_snapshot_without_partial_commit(
+        self,
+    ) -> None:
+        manager = PlayerManager(
+            Mock(),
+            Mock(),
+            volume=0.5,
+            idle_timeout=10.0,
+            tts=TextToSpeech(lang="vi", synthesizer=_write_fake_mp3),
+            duck_level=0.2,
+        )
+        original = manager.set_audio_settings(
+            204,
+            GuildAudioSettings(0.8, 0.3, "en"),
+        )
+
+        invalid = (
+            GuildAudioSettings(float("nan"), 0.3, "en"),
+            GuildAudioSettings(0.8, 1.1, "en"),
+            GuildAudioSettings(0.8, 0.3, "unsupported"),
+        )
+        for settings in invalid:
+            with self.subTest(settings=settings):
+                with self.assertRaises(ValueError):
+                    manager.set_audio_settings(204, settings)
+                self.assertEqual(manager.audio_settings(204), original)
+
     async def test_title_announcement_preference_updates_and_survives_recreate(
         self,
     ) -> None:

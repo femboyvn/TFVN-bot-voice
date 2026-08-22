@@ -112,6 +112,23 @@ class DuckingAudioSource(discord.AudioSource):
         with self._lock:
             self._primary_paused = False
 
+    def set_duck_level(self, duck_level: float) -> None:
+        """Update the music gain used while secondary audio is present."""
+        if not 0.0 <= duck_level <= 1.0:
+            raise ValueError("duck_level must be between 0 and 1")
+        with self._lock:
+            self.duck_level = duck_level
+
+    def set_primary_volume(self, volume: float) -> bool:
+        """Update an active PCM volume transformer without restarting music."""
+        if not 0.0 <= volume <= 2.0:
+            raise ValueError("volume must be between 0 and 2")
+        with self._lock:
+            if not isinstance(self.primary, discord.PCMVolumeTransformer):
+                return False
+            self.primary.volume = volume
+            return True
+
     def inject_secondary(self, source: discord.AudioSource) -> threading.Event:
         """Start mixing *source* over the primary; music is ducked until it ends.
 

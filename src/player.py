@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -18,6 +19,7 @@ from .media import MediaService, QueuedTrack, Track
 from .tts import (
     TTSError,
     TextToSpeech,
+    normalize_tts_language,
     now_playing_speech,
     play_tts_on_voice_client,
     tts_playback_timeout,
@@ -67,6 +69,15 @@ class PlayerSnapshot:
     loop_current: bool
 
 
+@dataclass(frozen=True, slots=True)
+class GuildAudioSettings:
+    """Process-lifetime audio preferences shared within one Discord guild."""
+
+    music_volume: float
+    duck_level: float
+    tts_language: str
+
+
 StateChangeListener = Callable[[int, PlayerSnapshot], Awaitable[None]]
 
 
@@ -98,6 +109,7 @@ class GuildPlayer:
         idle_timeout: float,
         on_idle: IdleCallback,
         tts: TextToSpeech | None = None,
+        tts_volume: float | None = None,
         tts_enabled: bool = True,
         duck_level: float = DEFAULT_DUCK_LEVEL,
         on_state_change: StateChangeListener | None = None,
@@ -105,7 +117,9 @@ class GuildPlayer:
         self.bot = bot
         self.guild = guild
         self.media = media
-        self.volume = volume
+        self.music_volume = volume
+        # Runtime music gain is intentionally independent from speech gain.
+        self.tts_volume = volume if tts_volume is None else tts_volume
         self.idle_timeout = idle_timeout
         self.on_idle = on_idle
         self.tts = tts
@@ -132,6 +146,30 @@ class GuildPlayer:
             self._player_loop(),
             name=f"guild-player-{guild.id}",
         )
+
+    @property
+    def volume(self) -> float:
+        """Backward-compatible alias for the music output gain."""
+        return self.music_volume
+
+    @volume.setter
+    def volume(self, value: float) -> None:
+        self.music_volume = value
+
+    def apply_audio_settings(
+        self,
+        settings: GuildAudioSettings,
+        *,
+        tts: TextToSpeech | None,
+    ) -> None:
+        """Apply guild settings to current and future playback immediately."""
+        self.music_volume = settings.music_volume
+        self.duck_level = settings.duck_level
+        self.tts = tts
+        mixer = self._mixer
+        if mixer is not None:
+            mixer.set_primary_volume(settings.music_volume)
+            mixer.set_duck_level(settings.duck_level)
 
     async def enqueue(
         self,
@@ -504,12 +542,12 @@ class GuildPlayer:
                 if jump_request is None:
                     source = self.media.create_audio_source(
                         resolved_track,
-                        volume=self.volume,
+                        volume=self.music_volume,
                     )
                 else:
                     source = self.media.create_audio_source(
                         resolved_track,
-                        volume=self.volume,
+                        volume=self.music_volume,
                         start_at=jump_request.offset,
                     )
                 mixer = DuckingAudioSource(source, duck_level=self.duck_level)
@@ -584,7 +622,7 @@ class GuildPlayer:
             voice_client,
             self.tts,
             text,
-            volume=self.volume,
+            volume=getattr(self, "tts_volume", self.volume),
             skip_if_busy=True,
         )
 
@@ -606,7 +644,7 @@ class GuildPlayer:
             source, audio_path = await asyncio.to_thread(
                 self.tts.create_audio_source,
                 text,
-                volume=self.volume,
+                volume=getattr(self, "tts_volume", self.volume),
             )
         except TTSError as exc:
             log.warning("TTS synthesis skipped in guild %s: %s", self.guild.id, exc)
@@ -801,11 +839,64 @@ class PlayerManager:
         self._players: dict[int, GuildPlayer] = {}
         # Preferences outlive individual idle/stopped GuildPlayer instances.
         self._title_announcement_preferences: dict[int, bool] = {}
+        default_language = tts.lang if tts is not None else "vi"
+        self._default_audio_settings = GuildAudioSettings(
+            music_volume=volume,
+            duck_level=duck_level,
+            tts_language=default_language,
+        )
+        self._audio_settings: dict[int, GuildAudioSettings] = {}
+        self._guild_tts: dict[int, TextToSpeech] = {}
         self._state_listeners: list[StateChangeListener] = []
         self._lifecycle_locks: dict[int, asyncio.Lock] = {}
 
     def get(self, guild_id: int) -> GuildPlayer | None:
         return self._players.get(guild_id)
+
+    def audio_settings(self, guild_id: int) -> GuildAudioSettings:
+        """Return immutable runtime settings, falling back to startup defaults."""
+        return self._audio_settings.get(guild_id, self._default_audio_settings)
+
+    def tts_for_guild(self, guild_id: int) -> TextToSpeech | None:
+        """Return a guild-isolated TTS service for current runtime settings."""
+        if self.tts is None:
+            return None
+        settings = self.audio_settings(guild_id)
+        service = self._guild_tts.get(guild_id)
+        if service is None or service.lang != settings.tts_language:
+            service = self.tts.with_language(settings.tts_language)
+            self._guild_tts[guild_id] = service
+        return service
+
+    def set_audio_settings(
+        self,
+        guild_id: int,
+        settings: GuildAudioSettings,
+    ) -> GuildAudioSettings:
+        """Validate, persist, and apply one guild's complete audio snapshot."""
+        music_volume = float(settings.music_volume)
+        duck_level = float(settings.duck_level)
+        if not math.isfinite(music_volume) or not 0.0 <= music_volume <= 2.0:
+            raise ValueError("music_volume must be between 0 and 2")
+        if not math.isfinite(duck_level) or not 0.0 <= duck_level <= 1.0:
+            raise ValueError("duck_level must be between 0 and 1")
+        language = normalize_tts_language(settings.tts_language)
+        normalized = GuildAudioSettings(
+            music_volume=music_volume,
+            duck_level=duck_level,
+            tts_language=language,
+        )
+
+        # Commit only after every field has passed validation.
+        self._audio_settings[guild_id] = normalized
+        self._guild_tts.pop(guild_id, None)
+        player = self._players.get(guild_id)
+        if player is not None:
+            player.apply_audio_settings(
+                normalized,
+                tts=self.tts_for_guild(guild_id),
+            )
+        return normalized
 
     def title_announcements_enabled(self, guild_id: int) -> bool:
         """Return the guild preference for spoken song-title announcements."""
@@ -847,16 +938,18 @@ class PlayerManager:
         async with lock:
             player = self._players.get(guild.id)
             if player is None:
+                audio_settings = self.audio_settings(guild.id)
                 player = GuildPlayer(
                     self.bot,
                     guild,
                     self.media,
-                    volume=self.volume,
+                    volume=audio_settings.music_volume,
                     idle_timeout=self.idle_timeout,
                     on_idle=self._remove_idle,
-                    tts=self.tts,
+                    tts=self.tts_for_guild(guild.id),
+                    tts_volume=self.volume,
                     tts_enabled=self.title_announcements_enabled(guild.id),
-                    duck_level=self.duck_level,
+                    duck_level=audio_settings.duck_level,
                     on_state_change=self._dispatch_state_change,
                 )
                 self._players[guild.id] = player
