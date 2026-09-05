@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import logging
 import re
+import socket
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any
+from urllib.parse import urlparse
 
 import discord
 import yt_dlp
+
+_log = logging.getLogger(__name__)
 
 
 YTDL_FORMAT_OPTIONS: dict[str, Any] = {
@@ -71,6 +77,49 @@ _UNAVAILABLE_TITLES = frozenset(
 
 class MediaExtractionError(RuntimeError):
     """Raised when media metadata cannot be extracted."""
+
+
+class MediaURLBlockedError(MediaExtractionError):
+    """Raised when a user-supplied URL targets a blocked network address."""
+
+
+def _validate_url(url: str) -> None:
+    """Block URLs that resolve to private, loopback, or reserved addresses.
+
+    Prevents server-side request forgery (SSRF) by verifying that the
+    hostname in *url* does not resolve to an internal or cloud-metadata
+    IP address before handing the URL to yt-dlp.
+
+    Raises :class:`MediaURLBlockedError` if the URL is unsafe.
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+    except ValueError:
+        raise MediaURLBlockedError("URL không hợp lệ")
+
+    if not hostname:
+        raise MediaURLBlockedError("URL không hợp lệ")
+
+    # Try direct IP literal first (avoids unnecessary DNS lookup).
+    try:
+        addr = ipaddress.ip_address(hostname)
+    except ValueError:
+        # Hostname is not an IP literal – resolve via DNS.
+        try:
+            resolved = socket.getaddrinfo(
+                hostname, None, proto=socket.IPPROTO_TCP
+            )
+        except socket.gaierror:
+            # Cannot resolve – let yt-dlp handle the error naturally.
+            return
+        if not resolved:
+            return
+        addr = ipaddress.ip_address(resolved[0][4][0])
+
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        _log.warning("Blocked SSRF attempt to %s (%s)", hostname, addr)
+        raise MediaURLBlockedError("URL này không được hỗ trợ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +188,7 @@ class MediaService:
                 )
             )
 
+        _validate_url(normalized_query)
         try:
             data = await asyncio.to_thread(
                 self._prepare_url,
@@ -155,6 +205,8 @@ class MediaService:
         )
 
     async def resolve(self, query: str) -> Track:
+        if HTTP_URL_PATTERN.match(query):
+            _validate_url(query)
         try:
             data = await asyncio.to_thread(self._extract, query)
         except yt_dlp.utils.DownloadError as exc:

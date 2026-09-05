@@ -9,8 +9,10 @@ from src.media import (
     MediaBatch,
     MediaExtractionError,
     MediaService,
+    MediaURLBlockedError,
     QueuedTrack,
     Track,
+    _validate_url,
     format_duration,
     parse_jump_timestamp,
 )
@@ -381,6 +383,85 @@ class AudioSourceTests(unittest.TestCase):
                 volume=0.5,
                 start_at=-1,
             )
+
+
+class URLValidationTests(unittest.TestCase):
+    """SSRF prevention via _validate_url."""
+
+    def test_blocks_loopback_ip_literal(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://127.0.0.1/latest/meta-data/")
+
+    def test_blocks_ipv6_loopback(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://[::1]/something")
+
+    def test_blocks_private_ip_10(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://10.0.0.1/internal")
+
+    def test_blocks_private_ip_172(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://172.16.0.1/internal")
+
+    def test_blocks_private_ip_192(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://192.168.1.1/internal")
+
+    def test_blocks_link_local_metadata_endpoint(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_blocks_hostname_resolving_to_private_ip(self) -> None:
+        fake_result = [(2, 1, 6, "", ("127.0.0.1", 0))]
+        with patch("src.media.socket.getaddrinfo", return_value=fake_result):
+            with self.assertRaises(MediaURLBlockedError):
+                _validate_url("http://evil.example.com/steal")
+
+    def test_allows_public_url(self) -> None:
+        fake_result = [(2, 1, 6, "", ("142.250.80.46", 0))]
+        with patch("src.media.socket.getaddrinfo", return_value=fake_result):
+            _validate_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_allows_dns_failure_to_pass_through(self) -> None:
+        """Unresolvable hostnames are let through for yt-dlp to handle."""
+        import socket as _sock
+
+        with patch(
+            "src.media.socket.getaddrinfo",
+            side_effect=_sock.gaierror("Name or service not known"),
+        ):
+            _validate_url("https://nonexistent.example.test/video")
+
+    def test_blocks_url_without_hostname(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            _validate_url("http:///no-host")
+
+
+class URLValidationIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Verify that prepare() and resolve() call _validate_url for URLs."""
+
+    def setUp(self) -> None:
+        self.media = MediaService()
+
+    async def test_prepare_blocks_private_url(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            await self.media.prepare("http://169.254.169.254/latest/meta-data/")
+
+    async def test_resolve_blocks_private_url(self) -> None:
+        with self.assertRaises(MediaURLBlockedError):
+            await self.media.resolve("http://10.0.0.1/internal")
+
+    async def test_resolve_skips_validation_for_plain_queries(self) -> None:
+        """Non-URL queries (search terms) should not trigger URL validation."""
+        fake_data = {
+            "title": "Song",
+            "url": "https://stream.example.test/audio",
+            "webpage_url": "https://www.youtube.com/watch?v=test",
+        }
+        with patch.object(MediaService, "_extract", return_value=fake_data):
+            track = await self.media.resolve("ytsearch1:some song")
+        self.assertEqual(track.title, "Song")
 
 
 if __name__ == "__main__":
