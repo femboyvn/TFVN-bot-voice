@@ -257,8 +257,44 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         replacement = manager.start(guild_one, channel_one)
         try:
             self.assertEqual(replacement.tts.lang, "ja")
+            self.assertFalse(replacement.name_announce)
         finally:
             await manager.stop(guild_one.id)
+
+    async def test_start_inherits_name_announce_preference(self) -> None:
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        tts = TextToSpeech(synthesizer=lambda t, p: p.write_bytes(b"x" * 8))
+        players = PlayerManager(
+            bot,
+            Mock(),
+            volume=0.7,
+            idle_timeout=10.0,
+            tts=tts,
+            duck_level=0.2,
+        )
+        manager = SessionManager(bot, tts, volume=0.7, players=players)
+        guild = Mock()
+        guild.id = 88
+        channel = Mock()
+        channel.id = 9
+        channel.name = "Lounge"
+        players.set_audio_settings(
+            88,
+            GuildAudioSettings(0.7, 0.2, "vi", True),
+        )
+
+        session = manager.start(guild, channel)
+        try:
+            self.assertTrue(session.name_announce)
+        finally:
+            await manager.stop(88)
+
+        restarted = manager.start(guild, channel)
+        try:
+            self.assertTrue(restarted.name_announce)
+        finally:
+            await manager.stop(88)
 
     async def test_start_stop_and_keep_connected(self) -> None:
         bot = Mock()
@@ -277,7 +313,7 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager.is_active(42))
         self.assertTrue(manager.keep_connected(42))
         self.assertEqual(session.voice_channel_id, 7)
-        self.assertTrue(session.name_announce)
+        self.assertFalse(session.name_announce)
 
         channel2 = Mock()
         channel2.id = 8
@@ -290,7 +326,7 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager.is_active(42))
         self.assertFalse(await manager.stop(42))
 
-    async def test_name_announce_toggle_defaults_on(self) -> None:
+    async def test_name_announce_toggle_defaults_off(self) -> None:
         bot = Mock()
         bot.loop = asyncio.get_running_loop()
         tts = TextToSpeech(synthesizer=lambda t, p: p.write_bytes(b"x" * 8))
@@ -302,10 +338,10 @@ class SessionManagerTests(unittest.IsolatedAsyncioTestCase):
         channel.name = "VC"
         session = manager.start(guild, channel)
         try:
-            self.assertTrue(session.name_announce)
-            self.assertFalse(session.set_name_announce(False))
             self.assertFalse(session.name_announce)
             self.assertTrue(session.set_name_announce(True))
+            self.assertTrue(session.name_announce)
+            self.assertFalse(session.set_name_announce(False))
             # offer_chat_message respects the flag
             session.set_name_announce(False)
             ok = session.offer_chat_message(

@@ -26,9 +26,11 @@ from ..media import (
 from ..music_ui import (
     PANEL_INTERACTION_TOKEN,
     AddInputResult,
+    AudioSettingsValidationError,
     MusicPanelManager,
     format_audio_settings,
     format_panel_bump_interval,
+    parse_name_announce,
     parse_panel_bump_interval,
 )
 from ..player import (
@@ -65,7 +67,10 @@ class MusicCog(commands.Cog, name="Music"):
         self.media = media
         self.players = players
         self.sessions = sessions
-        self.music_ui = MusicPanelManager(self)
+        self.music_ui = MusicPanelManager(
+            self,
+            command_prefix=settings.command_prefix,
+        )
         self._operation_locks: dict[int, asyncio.Lock] = {}
         self.players.add_state_listener(self.music_ui.on_player_state_change)
 
@@ -146,10 +151,11 @@ class MusicCog(commands.Cog, name="Music"):
     @commands.command(name="nameannounce")
     @commands.guild_only()
     async def name_announce(self, ctx: commands.Context[Any], mode: str) -> None:
-        """Turn speaker-name TTS prefix on or off for the current session.
+        """Turn speaker-name TTS prefix on or off for this guild.
 
         Usage: ``!tfd nameannounce on`` / ``!tfd nameannounce off``
-        Default for a new session is on (``"{name} nói {message}"``).
+        Default is off (message body only). The value is also stored
+        in the panel settings form and reused by later chat-reading sessions.
         """
         async with self._operation_lock(ctx.guild.id):
             session = self.sessions.get(ctx.guild.id)
@@ -166,12 +172,9 @@ class MusicCog(commands.Cog, name="Music"):
             ):
                 return
 
-            normalized = mode.strip().lower()
-            if normalized in {"on", "true", "1", "yes", "enable", "enabled"}:
-                enabled = True
-            elif normalized in {"off", "false", "0", "no", "disable", "disabled"}:
-                enabled = False
-            else:
+            try:
+                enabled = parse_name_announce(mode)
+            except AudioSettingsValidationError:
                 await ctx.send(
                     f"Dùng `{ctx.prefix}nameannounce on` hoặc "
                     f"`{ctx.prefix}nameannounce off`."
@@ -179,6 +182,17 @@ class MusicCog(commands.Cog, name="Music"):
                 return
 
             session.set_name_announce(enabled)
+            current = self.players.audio_settings(ctx.guild.id)
+            if current.name_announce != enabled:
+                self.players.set_audio_settings(
+                    ctx.guild.id,
+                    GuildAudioSettings(
+                        music_volume=current.music_volume,
+                        duck_level=current.duck_level,
+                        tts_language=current.tts_language,
+                        name_announce=enabled,
+                    ),
+                )
         if enabled:
             await ctx.send(
                 "Đã bật đọc tên người gửi "
@@ -923,6 +937,7 @@ class MusicCog(commands.Cog, name="Music"):
                     music_volume=settings.music_volume,
                     duck_level=current.duck_level,
                     tts_language=current.tts_language,
+                    name_announce=current.name_announce,
                 )
             try:
                 applied = self.players.set_audio_settings(guild_id, settings)
@@ -930,6 +945,9 @@ class MusicCog(commands.Cog, name="Music"):
                 return "Cài đặt âm thanh không hợp lệ."
             if self.settings.tts_enabled:
                 self.sessions.refresh_tts_language(guild_id)
+                session = self.sessions.get(guild_id)
+                if session is not None and session.active:
+                    session.set_name_announce(applied.name_announce)
             if panel_bump_minutes is not None:
                 self.music_ui.set_bump_interval_minutes(
                     guild_id,

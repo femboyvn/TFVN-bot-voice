@@ -1193,9 +1193,9 @@ class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):
 
         applied = manager.set_audio_settings(
             201,
-            GuildAudioSettings(0.9, 0.4, " EN "),
+            GuildAudioSettings(0.9, 0.4, " EN ", False),
         )
-        self.assertEqual(applied, GuildAudioSettings(0.9, 0.4, "en"))
+        self.assertEqual(applied, GuildAudioSettings(0.9, 0.4, "en", False))
         self.assertEqual(manager.audio_settings(201), applied)
         self.assertEqual(
             manager.audio_settings(202),

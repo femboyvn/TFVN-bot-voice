@@ -76,6 +76,7 @@ class GuildAudioSettings:
     music_volume: float
     duck_level: float
     tts_language: str
+    name_announce: bool = False
 
 
 StateChangeListener = Callable[[int, PlayerSnapshot], Awaitable[None]]
@@ -885,6 +886,7 @@ class PlayerManager:
             music_volume=music_volume,
             duck_level=duck_level,
             tts_language=language,
+            name_announce=bool(settings.name_announce),
         )
 
         # Commit only after every field has passed validation.

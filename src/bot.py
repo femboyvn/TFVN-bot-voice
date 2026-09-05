@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from .cogs.music import MusicCog
 from .config import Settings
+from .help_ui import InteractiveHelpCommand
 from .media import MediaService
 from .player import PlayerManager
 from .session import SessionManager
@@ -22,7 +23,11 @@ class VoiceBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
-        super().__init__(command_prefix=settings.command_prefix, intents=intents)
+        super().__init__(
+            command_prefix=settings.command_prefix,
+            intents=intents,
+            help_command=InteractiveHelpCommand(),
+        )
 
         self.settings = settings
         self.media = MediaService()

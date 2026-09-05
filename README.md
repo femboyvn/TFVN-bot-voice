@@ -35,10 +35,11 @@ The default prefix is `!tfd `, including the trailing space.
 
 | Command | Description |
 | --- | --- |
+| `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
 | `!tfd music` | Join your VC and open its shared interactive music panel |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
-| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **on** for new sessions) |
+| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
 | `!tfd play <URL or query>` | Join voice and queue a track |
 | `!tfd next <URL or query>` | Add another track to the queue |
 | `!tfd pause` | Pause playback |
@@ -61,6 +62,8 @@ The default prefix is `!tfd `, including the trailing space.
    timestamp jump, queue view, clear queue, stop, **Đọc tên bài**,
    **Đọc tin nhắn**, **Cài đặt**, and **Rời**. Members outside that channel,
    including administrators, cannot use these controls or move the bot.
+   **Trợ giúp** is an exception: anyone who can see the panel may open the private
+   help menu. `!tfd help` opens the same menu from a text command.
 5. The public panel shows the current track and the next five queued tracks. Search
    results, queue pages, confirmations, and errors are visible only to the requester.
 6. **Đọc tên bài** toggles the spoken song-title announcement; the text
@@ -72,9 +75,11 @@ The default prefix is `!tfd `, including the trailing space.
 7. **Cài đặt** opens a private form for the room's shared runtime audio settings:
    music volume accepts `0`–`200` percent; music level while TTS is speaking accepts
    `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction);
-   and TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
-   or `ko`. The same form controls automatic panel bumping in whole minutes: `0`
-   disables it, while `1`–`1440` reposts the panel at that interval.
+   TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
+   or `ko`; and **Đọc tên người gửi** accepts `on` or `off` (whether chat TTS
+   speaks `"{name} nói …"` before the message body). The same form controls
+   automatic panel bumping in whole minutes: `0` disables it, while `1`–`1440`
+   reposts the panel at that interval.
 
 Audio settings are shared per Discord server, not per user, and changing them from
 the panel affects current and future playback in that server. Music volume and the
@@ -111,9 +116,11 @@ that channel instead.
 
 1. Join a voice channel yourself.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
-3. Type in that **voice channel's text chat** — the bot speaks a Vietnamese line like  
-   `"{display name} nói {message}"` (name prefix is on by default).
-4. `!tfd nameannounce off` reads only the message body; `on` restores the name prefix.
+3. Type in that **voice channel's text chat** — the bot speaks the message body
+   (name prefix is off by default).
+4. `!tfd nameannounce on` or **Cài đặt → Đọc tên người gửi: on** speaks
+   `"{display name} nói {message}"`; `off` reads only the message body. The choice
+   is kept for later chat-reading sessions until the bot process restarts.
 5. Bot commands (`!tfd …`) are not read aloud.
 6. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
 7. `!tfd leave` ends monitoring and disconnects.
@@ -140,6 +147,7 @@ src/
   tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
   cogs/music.py   # user-facing commands (Vietnamese replies)
+  help_ui.py      # interactive Vietnamese help menu
 tests/            # fast unit and construction tests
 ```
 

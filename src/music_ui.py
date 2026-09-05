@@ -11,11 +11,13 @@ import asyncio
 import contextlib
 import logging
 import math
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
 import discord
 
+from .help_ui import HelpMenuView, normalize_help_prefix
 from .media import SearchResult, format_duration, parse_jump_timestamp
 from .player import GuildAudioSettings, PlaybackState, PlayerSnapshot
 from .tts import normalize_tts_language
@@ -29,9 +31,33 @@ PANEL_INTERACTION_TOKEN = "tfd_music_panel_view"
 MIN_PANEL_BUMP_MINUTES = 1
 MAX_PANEL_BUMP_MINUTES = 1440
 
+_NAME_ANNOUNCE_ON = frozenset(
+    {"on", "true", "1", "yes", "enable", "enabled", "bật", "bat"}
+)
+_NAME_ANNOUNCE_OFF = frozenset(
+    {"off", "false", "0", "no", "disable", "disabled", "tắt", "tat"}
+)
+
 
 class AudioSettingsValidationError(ValueError):
     """A requester-facing validation failure for the settings modal."""
+
+
+def parse_name_announce(value: str) -> bool:
+    """Parse an on/off field for speaker-name TTS."""
+    normalized = unicodedata.normalize("NFC", value).strip().lower()
+    if normalized in _NAME_ANNOUNCE_ON:
+        return True
+    if normalized in _NAME_ANNOUNCE_OFF:
+        return False
+    raise AudioSettingsValidationError(
+        "Đọc tên người gửi phải là on hoặc off."
+    )
+
+
+def format_name_announce(enabled: bool) -> str:
+    """Value shown in the settings modal, matching the prefix command."""
+    return "on" if enabled else "off"
 
 
 def _parse_percentage(value: str, *, maximum: float, error: str) -> float:
@@ -52,6 +78,7 @@ def parse_audio_settings(
     music_volume: str,
     duck_level: str,
     tts_language: str,
+    name_announce: str,
 ) -> GuildAudioSettings:
     """Validate all modal fields and return one atomic runtime snapshot."""
     volume = _parse_percentage(
@@ -70,7 +97,8 @@ def parse_audio_settings(
         raise AudioSettingsValidationError(
             "Mã ngôn ngữ TTS không được hỗ trợ. Ví dụ: vi, en, ja, ko."
         ) from exc
-    return GuildAudioSettings(volume, duck, language)
+    announce = parse_name_announce(name_announce)
+    return GuildAudioSettings(volume, duck, language, announce)
 
 
 def _format_percentage(value: float) -> str:
@@ -105,7 +133,8 @@ def format_audio_settings(settings: GuildAudioSettings) -> str:
     return (
         f"Nhạc: {_format_percentage(settings.music_volume)}% · "
         f"Nhạc còn lại khi TTS: {_format_percentage(settings.duck_level)}% · "
-        f"TTS: {settings.tts_language}"
+        f"TTS: {settings.tts_language} · "
+        f"Đọc tên: {'Bật' if settings.name_announce else 'Tắt'}"
     )
 
 
@@ -616,6 +645,12 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
         required=True,
         max_length=20,
     )
+    name_announce = discord.ui.TextInput(
+        label="Đọc tên người gửi",
+        placeholder="on hoặc off",
+        required=True,
+        max_length=16,
+    )
     panel_bump_minutes = discord.ui.TextInput(
         label="Đưa bảng lên lại (phút)",
         placeholder="0 = tắt; hoặc nhập từ 1 đến 1440",
@@ -638,10 +673,12 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
         self.music_volume.default = _format_percentage(settings.music_volume)
         self.duck_level.default = _format_percentage(settings.duck_level)
         self.tts_language.default = settings.tts_language
+        self.name_announce.default = format_name_announce(settings.name_announce)
         self.panel_bump_minutes.default = str(panel_bump_minutes)
         if not tts_available:
             self.remove_item(self.duck_level)
             self.remove_item(self.tts_language)
+            self.remove_item(self.name_announce)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view = self.panel_view
@@ -657,6 +694,7 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
                     str(self.music_volume),
                     str(self.duck_level),
                     str(self.tts_language),
+                    str(self.name_announce),
                 )
             else:
                 settings = GuildAudioSettings(
@@ -667,6 +705,7 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
                     ),
                     duck_level=self.current_settings.duck_level,
                     tts_language=self.current_settings.tts_language,
+                    name_announce=self.current_settings.name_announce,
                 )
         except AudioSettingsValidationError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
@@ -1020,6 +1059,29 @@ class MusicPanelView(discord.ui.View):
     ) -> None:
         await self._run(interaction, "leave")
 
+    @discord.ui.button(
+        label="Trợ giúp",
+        emoji="❓",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def show_help(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        # Help is documentation, not a room control. Anyone who can see the
+        # panel may open it, including members who are not in the voice channel.
+        prefix = normalize_help_prefix(getattr(self.manager, "command_prefix", None))
+        view = HelpMenuView(interaction.user.id, prefix)
+        message = await _send_ephemeral(
+            interaction,
+            "Chọn một chủ đề bên dưới.",
+            view=view,
+            embed=view.render_embed(),
+        )
+        view.message = message
+
 
 @dataclass(slots=True)
 class MusicPanelRecord:
@@ -1069,9 +1131,11 @@ class MusicPanelManager:
         actions: MusicUIActions,
         *,
         registry: MusicPanelRegistry | None = None,
+        command_prefix: str = "!tfd ",
     ) -> None:
         self.actions = actions
         self.registry = registry or MusicPanelRegistry()
+        self.command_prefix = command_prefix
         self._post_locks: dict[int, asyncio.Lock] = {}
         self._refresh_tasks: set[asyncio.Task[None]] = set()
         self._bump_intervals: dict[int, int] = {}

@@ -293,8 +293,12 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_panel_audio_settings_update_shared_guild_state(self) -> None:
         interaction = self._make_panel_interaction()
-        requested = GuildAudioSettings(0.55, 0.15, "en")
-        applied = GuildAudioSettings(0.55, 0.15, "en")
+        requested = GuildAudioSettings(0.55, 0.15, "en", False)
+        applied = GuildAudioSettings(0.55, 0.15, "en", False)
+        session = Mock()
+        session.active = True
+        session.set_name_announce = Mock(return_value=False)
+        self.sessions.get.return_value = session
         self.players.set_audio_settings = Mock(return_value=applied)
         self.sessions.refresh_tts_language = Mock(return_value=True)
 
@@ -307,9 +311,11 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
         self.players.set_audio_settings.assert_called_once_with(1, requested)
         self.sessions.refresh_tts_language.assert_called_once_with(1)
+        session.set_name_announce.assert_called_once_with(False)
         self.assertIn("55%", result)
         self.assertIn("15%", result)
         self.assertIn("en", result)
+        self.assertIn("Tắt", result)
 
     async def test_panel_audio_settings_store_bump_interval_and_report_it(
         self,
@@ -385,12 +391,13 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         interaction = self._make_panel_interaction()
         self.settings.tts_enabled = False
-        current = GuildAudioSettings(0.7, 0.2, "vi")
-        requested = GuildAudioSettings(1.25, 0.8, "en")
-        music_only = GuildAudioSettings(1.25, 0.2, "vi")
+        current = GuildAudioSettings(0.7, 0.2, "vi", False)
+        requested = GuildAudioSettings(1.25, 0.8, "en", True)
+        music_only = GuildAudioSettings(1.25, 0.2, "vi", False)
         self.players.audio_settings = Mock(return_value=current)
         self.players.set_audio_settings = Mock(return_value=music_only)
         self.sessions.refresh_tts_language = Mock(return_value=False)
+        self.sessions.get.return_value = Mock()
 
         result = await self.cog.ui_update_audio_settings(
             interaction,
@@ -402,7 +409,8 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.players.audio_settings.assert_called_once_with(1)
         self.players.set_audio_settings.assert_called_once_with(1, music_only)
         self.sessions.refresh_tts_language.assert_not_called()
-        self.assertEqual(requested, GuildAudioSettings(1.25, 0.8, "en"))
+        self.sessions.get.assert_not_called()
+        self.assertEqual(requested, GuildAudioSettings(1.25, 0.8, "en", True))
         self.assertIn("125%", result)
         self.assertIn("20%", result)
         self.assertIn("vi", result)
@@ -641,9 +649,11 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nameannounce_requires_active_session(self) -> None:
         self.sessions.get.return_value = None
+        self.players.set_audio_settings = Mock()
         await self.cog.name_announce.callback(self.cog, self.ctx, "on")
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("join", sent)
+        self.players.set_audio_settings.assert_not_called()
 
     async def test_nameannounce_toggles_session_flag(self) -> None:
         session = Mock()
@@ -651,9 +661,18 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         session.voice_channel_id = 7
         session.set_name_announce = Mock(return_value=False)
         self.sessions.get.return_value = session
+        current = GuildAudioSettings(0.7, 0.2, "vi", True)
+        self.players.audio_settings = Mock(return_value=current)
+        self.players.set_audio_settings = Mock(
+            return_value=GuildAudioSettings(0.7, 0.2, "vi", False)
+        )
 
         await self.cog.name_announce.callback(self.cog, self.ctx, "off")
         session.set_name_announce.assert_called_once_with(False)
+        self.players.set_audio_settings.assert_called_once_with(
+            1,
+            GuildAudioSettings(0.7, 0.2, "vi", False),
+        )
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("tắt", sent.lower())
 
