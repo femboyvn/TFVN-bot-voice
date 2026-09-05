@@ -9,10 +9,11 @@ from discord.ext import commands
 
 from .cogs.music import MusicCog
 from .config import Settings
+from .help_ui import InteractiveHelpCommand
 from .media import MediaService
 from .player import PlayerManager
 from .session import SessionManager
-from .tts import TextToSpeech
+from .tts import TextToSpeech, normalize_tts_language
 
 log = logging.getLogger(__name__)
 
@@ -22,11 +23,15 @@ class VoiceBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
-        super().__init__(command_prefix=settings.command_prefix, intents=intents)
+        super().__init__(
+            command_prefix=settings.command_prefix,
+            intents=intents,
+            help_command=InteractiveHelpCommand(),
+        )
 
         self.settings = settings
         self.media = MediaService()
-        self.tts = TextToSpeech(lang=settings.tts_lang)
+        self.tts = TextToSpeech(lang=normalize_tts_language(settings.tts_lang))
         self.sessions = SessionManager(
             self,
             self.tts,
@@ -59,6 +64,9 @@ class VoiceBot(commands.Bot):
         log.info("Bot ready as %s (guilds: %s)", self.user, len(self.guilds))
 
     async def close(self) -> None:
+        music_cog = self.get_cog("Music")
+        if isinstance(music_cog, MusicCog):
+            await music_cog.close()
         await self.players.close_all()
         await self.sessions.close_all()
         await super().close()

@@ -1,9 +1,10 @@
 # TFD Voice Bot
 
-A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports URL playback,
-YouTube search, per-server queues, pause/resume, timestamp jumps, skip, looping, TTS
-"now playing" announcements, and **voice-chat sessions** that join a VC and read that
-channel's text chat aloud (via gTTS).
+A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports a shared
+Discord music-control panel, URL and YouTube-playlist playback, YouTube search,
+per-server queues, pause/resume, timestamp jumps, skip, looping, TTS "now playing"
+announcements, and **voice-chat sessions** that join a VC and read that channel's text
+chat aloud (via gTTS).
 
 User-facing Discord replies and spoken TTS phrases are in **Vietnamese** (customer UI).
 Source comments, logs, and this README stay in English.
@@ -34,9 +35,11 @@ The default prefix is `!tfd `, including the trailing space.
 
 | Command | Description |
 | --- | --- |
+| `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
+| `!tfd music` | Join your VC and open its shared interactive music panel |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
-| `!tfd leave` | End the chat session and leave voice |
-| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **on** for new sessions) |
+| `!tfd leave` | Stop music, end chat reading, and leave voice |
+| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
 | `!tfd play <URL or query>` | Join voice and queue a track |
 | `!tfd next <URL or query>` | Add another track to the queue |
 | `!tfd pause` | Pause playback |
@@ -44,16 +47,80 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd jump HH:MM:SS` | Jump to a timestamp in the current track |
 | `!tfd skip` | Skip the current track |
 | `!tfd loop` | Toggle looping for the current track |
-| `!tfd stop` | Stop music only (TTS session keeps running if you used `join`) |
+| `!tfd stop` | Stop the current track and clear the queue without leaving voice |
 | `!tfd search <query>` | Show five YouTube search results |
+
+### Shared music panel
+
+1. Join a voice channel and run `!tfd music`.
+2. Use **Tìm bài** to enter a search phrase, video URL, or YouTube playlist URL.
+   Plain queries show up to five ephemeral numbered results; press the matching
+   **1**–**5** button to append one to the queue.
+3. A playlist appends its available videos in order, inspecting at most the first 25
+   entries per request. Unavailable entries are skipped.
+4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
+   timestamp jump, queue view, clear queue, stop, **Đọc tên bài**,
+   **Đọc tin nhắn**, **Cài đặt**, and **Rời**. Members outside that channel,
+   including administrators, cannot use these controls or move the bot.
+   **Trợ giúp** is an exception: anyone who can see the panel may open the private
+   help menu. `!tfd help` opens the same menu from a text command.
+5. The public panel shows the current track and the next five queued tracks. Search
+   results, queue pages, confirmations, and errors are visible only to the requester.
+6. **Đọc tên bài** toggles the spoken song-title announcement; the text
+   **Đang phát** announcement is still posted when speech is off. **Đọc tin nhắn**
+   starts or stops reading the voice channel's text chat without stopping music or
+   making the bot leave voice. **Rời** is the explicit action that stops music,
+   clears the queue, turns off chat reading, and disconnects. A phrase already being
+   spoken may finish after either reading control is turned off.
+7. **Cài đặt** opens a private form for the room's shared runtime audio settings:
+   music volume accepts `0`–`200` percent; music level while TTS is speaking accepts
+   `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction);
+   TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
+   or `ko`; and **Đọc tên người gửi** accepts `on` or `off` (whether chat TTS
+   speaks `"{name} nói …"` before the message body). The same form controls
+   automatic panel bumping in whole minutes: `0` disables it, while `1`–`1440`
+   reposts the panel at that interval.
+
+Audio settings are shared per Discord server, not per user, and changing them from
+the panel affects current and future playback in that server. Music volume and the
+TTS duck level update an active music mixer immediately. A language change is used
+by subsequent song-title and chat messages, including an already-active chat-reading
+session; audio that has already started speaking may finish in the old language.
+Music volume controls the music track only and does not change TTS loudness.
+
+Runtime audio settings are kept in memory. They reset to `DEFAULT_VOLUME`,
+`MUSIC_DUCK_LEVEL`, and `TTS_LANG` from the environment whenever the bot process
+restarts; the automatic panel-bump interval also resets to off. No database
+persistence is performed.
+
+Both speech controls are unavailable when `TTS_ENABLED=false`. In that mode,
+**Cài đặt** still allows music-volume changes, while the inactive TTS fields are hidden
+and left unchanged.
+
+Only one panel is active per Discord server during the current process. Opening a new
+panel disables the old one. An automatic bump sends a fresh panel at the bottom of
+the same text channel and then deletes the superseded panel, without changing music,
+queue, voice-room binding, or TTS state. If deleting the old message fails, its
+controls are disabled instead. Automatic bumps pause while the bot is disconnected.
+After a bot restart, run `!tfd music` again. **Xóa hàng đợi** removes waiting tracks
+but leaves the current track playing. **Dừng** stops the current track and clears the
+queue without ending chat reading or immediately leaving voice; `!tfd leave` stops
+music, ends chat reading, and disconnects. When chat reading is off, the normal player
+idle timeout may disconnect the bot later.
+
+All voice and playback commands use the same room rule as the panel. If the bot is
+already connected to another voice channel, it stays there and tells the caller to join
+that channel instead.
 
 ### Voice-chat session (join + monitor)
 
 1. Join a voice channel yourself.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
-3. Type in that **voice channel's text chat** — the bot speaks a Vietnamese line like  
-   `"{display name} nói {message}"` (name prefix is on by default).
-4. `!tfd nameannounce off` reads only the message body; `on` restores the name prefix.
+3. Type in that **voice channel's text chat** — the bot speaks the message body
+   (name prefix is off by default).
+4. `!tfd nameannounce on` or **Cài đặt → Đọc tên người gửi: on** speaks
+   `"{display name} nói {message}"`; `off` reads only the message body. The choice
+   is kept for later chat-reading sessions until the bot process restarts.
 5. Bot commands (`!tfd …`) are not read aloud.
 6. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
 7. `!tfd leave` ends monitoring and disconnects.
@@ -80,6 +147,7 @@ src/
   tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
   cogs/music.py   # user-facing commands (Vietnamese replies)
+  help_ui.py      # interactive Vietnamese help menu
 tests/            # fast unit and construction tests
 ```
 

@@ -118,8 +118,8 @@ def prepare_chat_speech(
 ) -> str | None:
     """Build a plain-speech line for a VC chat message, or None if empty.
 
-    When *announce_name* is True (session default), speaks
-    ``"{name} nói {message}"``. When False, speaks only the message body.
+    When *announce_name* is True, speaks ``"{name} nói {message}"``.
+    When False (session default), speaks only the message body.
     Skips pure link / GIF / emoji messages after sanitization.
     """
     cleaned = sanitize_for_speech(content)
@@ -191,6 +191,7 @@ class VoiceSession:
         max_speech_chars: int = DEFAULT_MAX_SPEECH_CHARS,
         tts_chunk_chars: int = DEFAULT_TTS_CHUNK_CHARS,
         queue_max: int = DEFAULT_SPEECH_QUEUE_MAX,
+        name_announce: bool = False,
     ) -> None:
         self.bot = bot
         self.guild = guild
@@ -201,8 +202,8 @@ class VoiceSession:
         self.get_player = get_player or (lambda _gid: None)
         self.max_speech_chars = max_speech_chars
         self.tts_chunk_chars = tts_chunk_chars
-        # Default on for every new session: speak "{name} nói …".
-        self.name_announce = True
+        # Guild default is off: speak the message body only.
+        self.name_announce = bool(name_announce)
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=queue_max)
         self._closed = False
         self._task = asyncio.create_task(
@@ -396,16 +397,37 @@ class SessionManager:
             return existing
 
         players = self.players
+        guild_tts = (
+            players.tts_for_guild(guild.id)
+            if players is not None
+            else None
+        )
+        name_announce = False
+        if players is not None:
+            name_announce = players.audio_settings(guild.id).name_announce
         session = VoiceSession(
             self.bot,
             guild,
             voice_channel,
-            self.tts,
+            guild_tts or self.tts,
             volume=self.volume,
             get_player=(players.get if players is not None else None),
+            name_announce=name_announce,
         )
         self._sessions[guild.id] = session
         return session
+
+    def refresh_tts_language(self, guild_id: int) -> bool:
+        """Apply the current guild language to an already-running session."""
+        session = self._sessions.get(guild_id)
+        players = self.players
+        if session is None or not session.active or players is None:
+            return False
+        tts = players.tts_for_guild(guild_id)
+        if tts is None:
+            return False
+        session.tts = tts
+        return True
 
     async def stop(self, guild_id: int) -> bool:
         session = self._sessions.pop(guild_id, None)
