@@ -41,6 +41,13 @@ from ..player import (
     PlayerSnapshot,
 )
 from ..session import SessionManager
+from ..soundboard import (
+    SoundboardEntry,
+    SoundboardError,
+    SoundboardService,
+    format_clip_duration,
+)
+from ..soundboard_ui import SoundboardView
 from ..spotify import is_spotify_input
 from ..voice import (
     VoiceAccessError,
@@ -62,12 +69,16 @@ class MusicCog(commands.Cog, name="Music"):
         media: MediaService,
         players: PlayerManager,
         sessions: SessionManager,
+        soundboard: SoundboardService | None = None,
     ) -> None:
         self.bot = bot
         self.settings = settings
         self.media = media
         self.players = players
         self.sessions = sessions
+        self.soundboard_service = soundboard or SoundboardService.from_settings(
+            settings
+        )
         self.music_ui = MusicPanelManager(
             self,
             command_prefix=settings.command_prefix,
@@ -80,27 +91,24 @@ class MusicCog(commands.Cog, name="Music"):
     async def music(self, ctx: commands.Context[Any]) -> None:
         """Join the caller's room and post its shared music control panel."""
         async with self._operation_lock(ctx.guild.id):
-            if not await self._preflight_voice_connection(ctx):
+            await self._join_and_post_panel(ctx)
+
+    @commands.command()
+    @commands.guild_only()
+    async def soundboard(self, ctx: commands.Context[Any]) -> None:
+        """Join the caller's room, post the music panel, and open the soundboard."""
+        async with self._operation_lock(ctx.guild.id):
+            channel_id = await self._join_and_post_panel(ctx)
+            if channel_id is None:
                 return
-            player = await self.players.get_or_create(ctx.guild)
-            player.reserve_activity()
             try:
-                voice_client = await self._connect_for_context(ctx)
-                if voice_client is None:
-                    return
-
-                channel = voice_client.channel
-                if channel is None:
-                    await ctx.send("Đã kết nối nhưng không gắn được kênh thoại.")
-                    return
-
-                await self.music_ui.post_panel(
-                    ctx.channel,
-                    ctx.guild.id,
-                    channel.id,
-                )
-            finally:
-                player.release_activity()
+                entries = await self.soundboard_service.list(ctx.guild.id)
+            except SoundboardError as exc:
+                await ctx.send(str(exc))
+                return
+        view = SoundboardView(self, ctx.guild.id, channel_id, entries)
+        message = await ctx.send(embed=view.render_embed(), view=view)
+        view.message = message
 
     @commands.command()
     @commands.guild_only()
@@ -456,6 +464,32 @@ class MusicCog(commands.Cog, name="Music"):
         await ctx.send(error)
         return False
 
+    async def _join_and_post_panel(
+        self,
+        ctx: commands.Context[Any],
+    ) -> int | None:
+        """Connect and post the shared panel. Returns the bound voice channel id."""
+        if not await self._preflight_voice_connection(ctx):
+            return None
+        player = await self.players.get_or_create(ctx.guild)
+        player.reserve_activity()
+        try:
+            voice_client = await self._connect_for_context(ctx)
+            if voice_client is None:
+                return None
+            channel = voice_client.channel
+            if channel is None:
+                await ctx.send("Đã kết nối nhưng không gắn được kênh thoại.")
+                return None
+            await self.music_ui.post_panel(
+                ctx.channel,
+                ctx.guild.id,
+                channel.id,
+            )
+            return channel.id
+        finally:
+            player.release_activity()
+
     async def _preflight_voice_connection(
         self,
         ctx: commands.Context[Any],
@@ -537,6 +571,140 @@ class MusicCog(commands.Cog, name="Music"):
     def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings:
         """Return this guild's process-lifetime shared audio preferences."""
         return self.players.audio_settings(guild_id)
+
+    async def ui_list_soundboard(
+        self, guild_id: int
+    ) -> tuple[SoundboardEntry, ...]:
+        return await self.soundboard_service.list(guild_id)
+
+    async def ui_play_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        sound_id: str,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+                allow_disconnected=True,
+            )
+            if error:
+                return error
+            entry = await self.soundboard_service.store.get(guild_id, sound_id)
+            if entry is None:
+                return "Âm thanh không còn tồn tại."
+            path = await self.soundboard_service.ensure_playable(guild_id, entry)
+            if path is None:
+                return "Không tìm thấy tệp âm thanh này."
+            guild = interaction.guild
+            if guild is None:
+                return "Bảng điều khiển này không còn hợp lệ."
+            player = await self.players.get_or_create(guild)
+            player.reserve_activity()
+            try:
+                try:
+                    await connect_member_voice_client(
+                        guild,
+                        interaction.user,
+                        self.settings,
+                        expected_channel_id=voice_channel_id,
+                    )
+                except VoiceAccessError as exc:
+                    return str(exc)
+            finally:
+                player.release_activity()
+
+        timeout = float(getattr(self.settings, "soundboard_max_seconds", 12)) + 5.0
+        ok = await player.play_overlay(path, timeout=timeout)
+        player.touch()
+        if ok:
+            return (
+                f"Đã phát **{discord.utils.escape_markdown(entry.name)}**."
+            )
+        return "Không phát được âm thanh. Hãy thử lại."
+
+    async def ui_add_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        name: str,
+        url: str,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+                allow_disconnected=True,
+            )
+            if error:
+                return error
+            guild = interaction.guild
+            if guild is None:
+                return "Bảng điều khiển này không còn hợp lệ."
+            player = await self.players.get_or_create(guild)
+            player.reserve_activity()
+            try:
+                try:
+                    await connect_member_voice_client(
+                        guild,
+                        interaction.user,
+                        self.settings,
+                        expected_channel_id=voice_channel_id,
+                    )
+                except VoiceAccessError as exc:
+                    return str(exc)
+            finally:
+                player.release_activity()
+
+        try:
+            entry = await self.soundboard_service.add_sound(
+                guild_id,
+                name=name,
+                url=url,
+                added_by=interaction.user.id,
+            )
+        except SoundboardError as exc:
+            return str(exc)
+        except Exception:
+            log.exception("Could not add soundboard clip in guild %s", guild_id)
+            return "Không lưu được âm thanh. Hãy thử lại."
+        return (
+            f"Đã lưu **{discord.utils.escape_markdown(entry.name)}** "
+            f"({format_clip_duration(entry.duration_ms)})."
+        )
+
+    async def ui_remove_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        sound_id: str,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+            )
+            if error:
+                return error
+            permissions = getattr(interaction.user, "guild_permissions", None)
+            manage_guild = bool(getattr(permissions, "manage_guild", False))
+            try:
+                entry = await self.soundboard_service.remove_sound(
+                    guild_id,
+                    sound_id,
+                    user_id=interaction.user.id,
+                    manage_guild=manage_guild,
+                )
+            except SoundboardError as exc:
+                return str(exc)
+        return f"Đã xóa **{discord.utils.escape_markdown(entry.name)}**."
 
     async def ui_ensure_panel_access(
         self,

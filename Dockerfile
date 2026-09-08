@@ -10,7 +10,9 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
     && apt-get install --no-install-recommends -y ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 bot \
-    && useradd --uid 10001 --gid bot --create-home bot
+    && useradd --uid 10001 --gid bot --create-home bot \
+    && mkdir -p /data/soundboard \
+    && chown bot:bot /data/soundboard
 
 WORKDIR /app
 

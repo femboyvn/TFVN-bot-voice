@@ -65,6 +65,7 @@ class HelpCopyTests(unittest.TestCase):
             "Dừng",
             "Đọc tên bài",
             "Đọc tin nhắn",
+            "Bảng âm thanh",
             "Cài đặt",
             "Rời",
             "Trợ giúp",

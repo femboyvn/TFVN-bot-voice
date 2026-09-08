@@ -3,7 +3,8 @@
 A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports a shared
 Discord music-control panel, URL and YouTube-playlist playback, Spotify links,
 YouTube search,
-per-server queues, pause/resume, timestamp jumps, skip, looping, TTS "now playing"
+per-server queues, pause/resume, timestamp jumps, skip, looping, a **custom
+soundboard** (MyInstants/YouTube clips saved as MP3), TTS "now playing"
 announcements, and **voice-chat sessions** that join a VC and read that channel's text
 chat aloud (via gTTS).
 
@@ -44,6 +45,7 @@ The default prefix is `!tfd `, including the trailing space.
 | --- | --- |
 | `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
 | `!tfd music` | Join your VC and open its shared interactive music panel |
+| `!tfd soundboard` | Join your VC, open the music panel, and open the custom soundboard |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
@@ -67,7 +69,7 @@ The default prefix is `!tfd `, including the trailing space.
    entries per request. Unavailable entries are skipped.
 4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
    timestamp jump, queue view, clear queue, stop, **Đọc tên bài**,
-   **Đọc tin nhắn**, **Cài đặt**, and **Rời**. Members outside that channel,
+   **Đọc tin nhắn**, **Bảng âm thanh**, **Cài đặt**, and **Rời**. Members outside that channel,
    including administrators, cannot use these controls or move the bot.
    **Trợ giúp** is an exception: anyone who can see the panel may open the private
    help menu. `!tfd help` opens the same menu from a text command.
@@ -87,6 +89,17 @@ The default prefix is `!tfd `, including the trailing space.
    speaks `"{name} nói …"` before the message body). The same form controls
    automatic panel bumping in whole minutes: `0` disables it, while `1`–`1440`
    reposts the panel at that interval.
+8. **Bảng âm thanh** (or `!tfd soundboard`) opens a room-bound picker of short
+   clips saved for this Discord server. **Thêm** accepts a MyInstants page/mp3,
+   a YouTube URL, or a direct audio link; the bot downloads at most 12 seconds,
+   stores an MP3 plus a JSON index on disk, and plays the clip over music with
+   the same ducking used for TTS. Anyone in the bound voice room can play;
+   only the member who added a clip (or someone with **Manage Server**) can
+   delete it. The library is capped at 40 clips per server. Clips persist
+   across bot restarts (unlike in-memory audio settings). Optional Cloudflare
+   R2 (`R2_BUCKET` plus access keys) is the durable store; the server keeps a
+   local play cache and deletes unused MP3s after `SOUNDBOARD_CACHE_DAYS`
+   (default 7). Without R2, files stay on the data volume.
 
 Audio settings are shared per Discord server, not per user, and changing them from
 the panel affects current and future playback in that server. Music volume and the
@@ -155,6 +168,8 @@ src/
   tts.py          # text-to-speech for voice announcements
   voice.py        # voice connection and retry policy
   cogs/music.py   # user-facing commands (Vietnamese replies)
+  soundboard.py    # per-guild clip store, MyInstants/YouTube ingest
+  soundboard_ui.py # soundboard picker, add modal, delete confirm
   help_ui.py      # interactive Vietnamese help menu
 tests/            # fast unit and construction tests
 ```
@@ -181,4 +196,8 @@ docker compose logs -f bot
 
 Stop it with `docker compose down`. Set `BOT_IMAGE` to override the default local image
 name. The container includes FFmpeg, runs as an unprivileged user, and uses a read-only
-root filesystem with temporary runtime storage under `/tmp`.
+root filesystem with temporary runtime storage under `/tmp`. Soundboard clips live on
+the `soundboard-data` volume at `/data/soundboard` (`SOUNDBOARD_DATA_DIR`). Local runs
+default to `data/soundboard/` in the working directory. Set the `R2_*` variables to
+keep the JSON index and MP3s in Cloudflare R2; the volume then only caches recently
+played clips.

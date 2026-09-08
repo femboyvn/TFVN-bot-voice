@@ -20,6 +20,7 @@ import discord
 from .help_ui import HelpMenuView, normalize_help_prefix
 from .media import SearchResult, format_duration, parse_jump_timestamp
 from .player import GuildAudioSettings, PlaybackState, PlayerSnapshot
+from .soundboard import SoundboardEntry
 from .tts import normalize_tts_language
 
 log = logging.getLogger(__name__)
@@ -249,6 +250,35 @@ class MusicUIActions(Protocol):
         voice_channel_id: int,
         settings: GuildAudioSettings,
         panel_bump_minutes: int,
+    ) -> str: ...
+
+    async def ui_list_soundboard(
+        self, guild_id: int
+    ) -> tuple[SoundboardEntry, ...]: ...
+
+    async def ui_play_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        sound_id: str,
+    ) -> str: ...
+
+    async def ui_add_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        name: str,
+        url: str,
+    ) -> str: ...
+
+    async def ui_remove_soundboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        sound_id: str,
     ) -> str: ...
 
 
@@ -1058,6 +1088,49 @@ class MusicPanelView(discord.ui.View):
         button: discord.ui.Button,
     ) -> None:
         await self._run(interaction, "leave")
+
+    @discord.ui.button(
+        label="Bảng âm thanh",
+        emoji="🔊",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def open_soundboard(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if not await self.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        from .soundboard_ui import SoundboardView
+
+        try:
+            entries = await self.actions.ui_list_soundboard(self.guild_id)
+        except Exception:
+            log.exception(
+                "Could not list soundboard clips in guild %s",
+                self.guild_id,
+            )
+            await interaction.followup.send(
+                "Không tải được bảng âm thanh. Hãy thử lại.",
+                ephemeral=True,
+            )
+            return
+        view = SoundboardView(
+            self.actions,
+            self.guild_id,
+            self.voice_channel_id,
+            entries,
+            panel_view=self,
+        )
+        message = await interaction.followup.send(
+            embed=view.render_embed(),
+            view=view,
+            ephemeral=True,
+            wait=True,
+        )
+        view.message = message
 
     @discord.ui.button(
         label="Trợ giúp",

@@ -12,6 +12,7 @@ from .config import Settings
 from .help_ui import InteractiveHelpCommand
 from .media import MediaService
 from .player import PlayerManager
+from .soundboard import SoundboardService
 from .spotify import SpotifyService
 from .session import SessionManager
 from .tts import TextToSpeech, normalize_tts_language
@@ -54,6 +55,7 @@ class VoiceBot(commands.Bot):
             keep_connected=self.sessions.keep_connected,
         )
         self.sessions.bind_players(self.players)
+        self.soundboard = SoundboardService.from_settings(settings)
 
     async def setup_hook(self) -> None:
         await self.add_cog(
@@ -63,6 +65,7 @@ class VoiceBot(commands.Bot):
                 self.media,
                 self.players,
                 self.sessions,
+                self.soundboard,
             )
         )
 

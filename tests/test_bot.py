@@ -28,6 +28,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
                     "join",
                     "leave",
                     "nameannounce",
+                    "soundboard",
                 }
                 <= command_names
             )

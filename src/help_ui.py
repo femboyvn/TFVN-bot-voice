@@ -27,6 +27,10 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Vào kênh thoại của bạn và gửi bảng điều khiển nhạc dùng chung.",
     ),
+    "soundboard": (
+        "",
+        "Vào kênh thoại, gửi bảng nhạc, và mở bảng âm thanh tùy chỉnh.",
+    ),
     "join": (
         "",
         "Vào kênh thoại và bắt đầu đọc chat văn bản của kênh đó bằng TTS.",
@@ -201,6 +205,7 @@ def _build_panel(prefix: str) -> discord.Embed:
             "**Đọc tên bài** — đọc to tiêu đề khi bài mới bắt đầu. "
             "Dòng chữ **Đang phát** vẫn được gửi khi tắt đọc.\n"
             "**Đọc tin nhắn** — đọc chat văn bản của kênh thoại.\n"
+            "**Bảng âm thanh** — thêm URL MyInstants/YouTube, phát clip đè lên nhạc.\n"
             "**Cài đặt** — âm lượng nhạc, mức nhạc khi TTS, ngôn ngữ TTS, "
             "đọc tên người gửi, và tự đưa bảng lên.\n"
             "**Rời** — dừng nhạc, tắt đọc chat, và rời kênh thoại.\n"
@@ -245,7 +250,7 @@ def _build_commands(prefix: str) -> discord.Embed:
     )
     embed.add_field(
         name="Thoại và TTS",
-        value=_command_lines(prefix, ("join", "leave", "nameannounce")),
+        value=_command_lines(prefix, ("join", "leave", "nameannounce", "soundboard")),
         inline=False,
     )
     embed.add_field(
@@ -348,6 +353,11 @@ _COMMAND_DETAILS: dict[str, str] = {
     "music": (
         "Chỉ có một bảng hoạt động trên mỗi máy chủ. Mở bảng mới sẽ tắt bảng cũ. "
         "Sau khi bot khởi động lại, chạy lại lệnh này."
+    ),
+    "soundboard": (
+        "Thư viện clip theo từng máy chủ, lưu trên đĩa (tối đa 12 giây, 40 clip). "
+        "Phát đè lên nhạc đang chạy, không dừng hàng đợi. "
+        "Dán URL MyInstants, YouTube, hoặc tệp âm thanh. Không dùng được playlist."
     ),
     "join": (
         "Gõ tin trong **chat của kênh thoại** để bot đọc. "

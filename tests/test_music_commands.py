@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
@@ -12,6 +13,7 @@ from src.media import MediaBatch, MediaExtractionError, QueuedTrack, SearchResul
 from src.cogs.music import MusicCog
 from src.music_ui import PANEL_INTERACTION_TOKEN
 from src.player import GuildAudioSettings, JumpResult
+from src.soundboard import SoundboardEntry
 
 
 class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
@@ -26,12 +28,20 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.players.remove = AsyncMock()
         self.sessions = Mock()
         self.sessions.get.return_value = None
+        self.soundboard = Mock()
+        self.soundboard.list = AsyncMock(return_value=())
+        self.soundboard.add_sound = AsyncMock()
+        self.soundboard.remove_sound = AsyncMock()
+        self.soundboard.store.get = AsyncMock(return_value=None)
+        self.soundboard.store.mp3_path = Mock(return_value=None)
+        self.settings.soundboard_max_seconds = 12
         self.cog = MusicCog(
             self.bot,
             self.settings,
             self.media,
             self.players,
             self.sessions,
+            self.soundboard,
         )
         self.ctx = AsyncMock()
         self.ctx.guild.id = 1
@@ -768,6 +778,44 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
             self.ctx.send.await_args.args[0],
         )
 
+    async def test_soundboard_posts_panel_and_picker(self) -> None:
+        player = Mock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        self.cog._connect_for_context = AsyncMock(
+            return_value=self.ctx.voice_client
+        )
+        self.cog.music_ui.post_panel = AsyncMock()
+        sent = MagicMock()
+        self.ctx.send = AsyncMock(return_value=sent)
+
+        await self.cog.soundboard.callback(self.cog, self.ctx)
+
+        self.cog.music_ui.post_panel.assert_awaited_once_with(
+            self.ctx.channel,
+            1,
+            7,
+        )
+        self.soundboard.list.assert_awaited_once_with(1)
+        self.ctx.send.assert_awaited()
+        kwargs = self.ctx.send.await_args.kwargs
+        self.assertEqual(kwargs["embed"].title, "Bảng âm thanh")
+        self.assertIsNotNone(kwargs["view"])
+
+    async def test_soundboard_outsider_does_not_post_panel_or_picker(self) -> None:
+        other_channel = Mock()
+        other_channel.id = 99
+        self.ctx.author.voice.channel = other_channel
+        self.cog.music_ui.post_panel = AsyncMock()
+
+        await self.cog.soundboard.callback(self.cog, self.ctx)
+
+        self.cog.music_ui.post_panel.assert_not_awaited()
+        self.soundboard.list.assert_not_awaited()
+        self.assertIn(
+            "kênh thoại của bot",
+            self.ctx.send.await_args.args[0],
+        )
+
     async def test_outside_room_is_denied_before_media_extraction(self) -> None:
         other_channel = Mock()
         other_channel.id = 99
@@ -998,6 +1046,95 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         player.release_activity.assert_called_once_with()
         player.enqueue_many.assert_awaited_once_with((item,), self.ctx.channel)
         self.assertIn("Bài thử", self.ctx.send.await_args.args[0])
+
+    async def test_ui_play_soundboard_plays_overlay_and_touches_player(self) -> None:
+        entry = SoundboardEntry(
+            id="abcd1234",
+            name="bruh",
+            mp3="abcd1234.mp3",
+            source_url="https://www.myinstants.com/en/instant/bruh/",
+            duration_ms=1100,
+            added_by=10,
+            added_at="2026-09-08T12:00:00+00:00",
+        )
+        clip = Path("/tmp/abcd1234.mp3")
+        self.soundboard.store.get = AsyncMock(return_value=entry)
+        self.soundboard.ensure_playable = AsyncMock(return_value=clip)
+        player = Mock()
+        player.play_overlay = AsyncMock(return_value=True)
+        self.players.get_or_create = AsyncMock(return_value=player)
+        interaction = self._make_panel_interaction()
+
+        with patch(
+            "src.cogs.music.connect_member_voice_client",
+            new=AsyncMock(return_value=self.ctx.voice_client),
+        ):
+            result = await self.cog.ui_play_soundboard(
+                interaction, 1, 7, "abcd1234"
+            )
+
+        player.play_overlay.assert_awaited_once_with(clip, timeout=17.0)
+        player.touch.assert_called()
+        self.assertIn("Đã phát", result)
+        self.assertIn("bruh", result)
+        player.enqueue_many = AsyncMock()
+        player.enqueue_many.assert_not_awaited()
+
+    async def test_ui_play_soundboard_rejects_wrong_room(self) -> None:
+        other_channel = Mock()
+        other_channel.id = 99
+        self.ctx.author.voice.channel = other_channel
+        self.soundboard.store.get = AsyncMock()
+        interaction = self._make_panel_interaction()
+
+        result = await self.cog.ui_play_soundboard(interaction, 1, 7, "abcd1234")
+
+        self.assertIn("kênh thoại", result)
+        self.soundboard.store.get.assert_not_awaited()
+
+    async def test_ui_add_soundboard_saves_clip(self) -> None:
+        entry = SoundboardEntry(
+            id="abcd1234",
+            name="bruh",
+            mp3="abcd1234.mp3",
+            source_url="https://www.myinstants.com/en/instant/bruh/",
+            duration_ms=1100,
+            added_by=10,
+            added_at="2026-09-08T12:00:00+00:00",
+        )
+        self.soundboard.add_sound = AsyncMock(return_value=entry)
+        player = Mock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        interaction = self._make_panel_interaction()
+
+        with patch(
+            "src.cogs.music.connect_member_voice_client",
+            new=AsyncMock(return_value=self.ctx.voice_client),
+        ):
+            result = await self.cog.ui_add_soundboard(
+                interaction,
+                1,
+                7,
+                "bruh",
+                "https://www.myinstants.com/en/instant/bruh/",
+            )
+
+        self.soundboard.add_sound.assert_awaited_once()
+        self.assertIn("Đã lưu", result)
+        self.assertIn("bruh", result)
+
+    async def test_ui_remove_soundboard_rejects_stale_panel(self) -> None:
+        old_view = object()
+        record = Mock()
+        record.view = object()
+        self.cog.music_ui.get = Mock(return_value=record)
+        interaction = self._make_panel_interaction()
+        interaction.extras = {PANEL_INTERACTION_TOKEN: old_view}
+
+        result = await self.cog.ui_remove_soundboard(interaction, 1, 7, "abcd1234")
+
+        self.assertIn("thay thế", result)
+        self.soundboard.remove_sound.assert_not_awaited()
 
 
 if __name__ == "__main__":

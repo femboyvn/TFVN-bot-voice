@@ -17,6 +17,7 @@ import discord
 from .ducking import DEFAULT_DUCK_LEVEL, DuckingAudioSource
 from .media import MediaService, QueuedTrack, Track
 from .tts import (
+    TTS_FFMPEG_OPTIONS,
     TTSError,
     TextToSpeech,
     normalize_tts_language,
@@ -626,6 +627,105 @@ class GuildPlayer:
             volume=getattr(self, "tts_volume", self.volume),
             skip_if_busy=True,
         )
+
+    def _file_audio_source(self, path: Path) -> discord.AudioSource:
+        """Build a local-file PCM source. The caller owns the file lifetime."""
+        source = discord.FFmpegPCMAudio(str(path), **TTS_FFMPEG_OPTIONS)
+        return discord.PCMVolumeTransformer(
+            source,
+            volume=getattr(self, "tts_volume", self.volume),
+        )
+
+    async def play_overlay(self, path: Path, *, timeout: float) -> bool:
+        """Play a local clip over music (ducked) or standalone if idle.
+
+        Does not delete *path*. Returns False on a missing file, disconnected
+        client, or playback failure. A new overlay replaces the previous one.
+        """
+        voice_client = self.guild.voice_client
+        if (
+            self._closed
+            or not path.is_file()
+            or not voice_client
+            or not voice_client.is_connected()
+        ):
+            return False
+
+        try:
+            source = await asyncio.to_thread(self._file_audio_source, path)
+        except Exception:
+            log.exception(
+                "Could not open overlay clip in guild %s",
+                self.guild.id,
+            )
+            return False
+
+        mixer = self._mixer
+        if mixer is not None and self._music_active:
+            if not voice_client.is_playing():
+                source.cleanup()
+                return False
+            try:
+                done = mixer.inject_secondary(source)
+                await asyncio.wait_for(
+                    asyncio.to_thread(done.wait),
+                    timeout=timeout,
+                )
+                return True
+            except TimeoutError:
+                log.warning(
+                    "Overlay clip timed out after %.1fs in guild %s",
+                    timeout,
+                    self.guild.id,
+                )
+                mixer.clear_secondary()
+                return False
+            except Exception:
+                log.exception(
+                    "Overlay clip failed in guild %s",
+                    self.guild.id,
+                )
+                mixer.clear_secondary()
+                return False
+
+        if voice_client.is_playing() or voice_client.is_paused():
+            voice_client.stop()
+
+        finished = asyncio.Event()
+
+        def after(error: Exception | None) -> None:
+            if error:
+                log.error(
+                    "Overlay playback failed in guild %s: %s",
+                    self.guild.id,
+                    error,
+                )
+            with contextlib.suppress(RuntimeError):
+                self.bot.loop.call_soon_threadsafe(finished.set)
+
+        try:
+            voice_client.play(source, after=after)
+            await asyncio.wait_for(finished.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            log.warning(
+                "Standalone overlay timed out after %.1fs in guild %s",
+                timeout,
+                self.guild.id,
+            )
+            if voice_client.is_playing():
+                voice_client.stop()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(finished.wait(), timeout=2.0)
+            return False
+        except Exception:
+            log.exception(
+                "Could not play overlay clip in guild %s",
+                self.guild.id,
+            )
+            with contextlib.suppress(Exception):
+                source.cleanup()
+            return False
 
     async def speak_over_music(self, text: str) -> bool:
         """Duck music and mix TTS over it. Returns False if music is not playing."""

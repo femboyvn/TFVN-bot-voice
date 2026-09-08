@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -1161,6 +1162,121 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertTrue(mixer.is_primary_paused)
         self.assertEqual(music.reads, 0)
+
+
+class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
+    def _clip(self) -> Path:
+        path = Path(self._tmp.name) / "clip.mp3"
+        path.write_bytes(b"ID3" + b"\x00" * 32)
+        return path
+
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+
+    async def asyncTearDown(self) -> None:
+        self._tmp.cleanup()
+
+    async def test_play_overlay_injects_secondary_when_mixer_is_active(self) -> None:
+        class _FiniteSource(discord.AudioSource):
+            def __init__(self) -> None:
+                self._left = 2
+                self.cleaned = False
+
+            def read(self) -> bytes:
+                if self._left <= 0:
+                    return b""
+                self._left -= 1
+                return b"\x00" * 16
+
+            def cleanup(self) -> None:
+                self.cleaned = True
+
+        class _CountingMusic(discord.AudioSource):
+            def read(self) -> bytes:
+                return b"\x01\x00" * 8
+
+            def cleanup(self) -> None:
+                return None
+
+        mixer = DuckingAudioSource(_CountingMusic(), duck_level=0.2)
+        player = object.__new__(GuildPlayer)
+        player.bot = Mock()
+        player.bot.loop = asyncio.get_running_loop()
+        player.guild = Mock()
+        player.guild.id = 1
+        player.volume = 0.7
+        player._closed = False
+        player._mixer = mixer
+        player._music_active = True
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = True
+        player.guild.voice_client = voice_client
+        finite = _FiniteSource()
+        clip = self._clip()
+
+        async def pump_mixer() -> None:
+            for _ in range(10):
+                await asyncio.sleep(0)
+                mixer.read()
+                if not mixer.is_ducking:
+                    break
+
+        with patch("src.player.discord.FFmpegPCMAudio", return_value=finite):
+            pump = asyncio.create_task(pump_mixer())
+            try:
+                ok = await asyncio.wait_for(
+                    player.play_overlay(clip, timeout=2.0),
+                    timeout=2.0,
+                )
+            finally:
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
+
+        self.assertTrue(ok)
+        voice_client.play.assert_not_called()
+        self.assertTrue(clip.is_file())
+
+    async def test_play_overlay_plays_standalone_when_idle(self) -> None:
+        player = object.__new__(GuildPlayer)
+        player.bot = Mock()
+        player.bot.loop = asyncio.get_running_loop()
+        player.guild = Mock()
+        player.guild.id = 2
+        player.volume = 0.7
+        player._closed = False
+        player._mixer = None
+        player._music_active = False
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = False
+        voice_client.is_paused.return_value = False
+
+        def play_and_finish(source, *, after=None):
+            if after is not None:
+                after(None)
+
+        voice_client.play.side_effect = play_and_finish
+        player.guild.voice_client = voice_client
+        clip = self._clip()
+        fake = _FakeAudioSource()
+
+        with patch("src.player.discord.FFmpegPCMAudio", return_value=fake):
+            ok = await player.play_overlay(clip, timeout=2.0)
+
+        self.assertTrue(ok)
+        voice_client.play.assert_called_once()
+        self.assertTrue(clip.is_file())
+
+    async def test_play_overlay_returns_false_for_missing_file(self) -> None:
+        player = object.__new__(GuildPlayer)
+        player._closed = False
+        player.guild = Mock()
+        player.guild.voice_client = MagicMock()
+        player.guild.voice_client.is_connected.return_value = True
+        missing = Path(self._tmp.name) / "nope.mp3"
+        self.assertFalse(await player.play_overlay(missing, timeout=1.0))
 
 
 class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):

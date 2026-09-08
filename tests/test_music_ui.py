@@ -71,6 +71,10 @@ class _Actions:
                 "Đọc tên: Tắt."
             )
         )
+        self.ui_list_soundboard = AsyncMock(return_value=())
+        self.ui_play_soundboard = AsyncMock(return_value="Đã phát.")
+        self.ui_add_soundboard = AsyncMock(return_value="Đã lưu.")
+        self.ui_remove_soundboard = AsyncMock(return_value="Đã xóa.")
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None:
         return self.current_snapshot
@@ -234,10 +238,26 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             row: sum(child.row == row for child in view.children)
             for row in range(4)
         }
-        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 1})
-        self.assertEqual(len(view.children), 13)
+        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 2})
+        self.assertEqual(len(view.children), 14)
+        self.assertEqual(view.open_soundboard.label, "Bảng âm thanh")
         self.assertEqual(view.show_help.label, "Trợ giúp")
         self.assertFalse(view.show_help.disabled)
+
+    async def test_soundboard_button_opens_ephemeral_picker(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        interaction = _interaction()
+        interaction.followup.send = AsyncMock(return_value=MagicMock())
+
+        await view.open_soundboard.callback(interaction)
+
+        actions.ui_ensure_panel_access.assert_awaited()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        actions.ui_list_soundboard.assert_awaited_once_with(1)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertEqual(kwargs["embed"].title, "Bảng âm thanh")
+        self.assertTrue(kwargs["ephemeral"])
 
         modal = AudioSettingsModal(
             view,
