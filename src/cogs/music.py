@@ -41,6 +41,7 @@ from ..player import (
     PlayerSnapshot,
 )
 from ..session import SessionManager
+from ..spotify import is_spotify_input
 from ..voice import (
     VoiceAccessError,
     connect_member_voice_client,
@@ -574,7 +575,7 @@ class MusicCog(commands.Cog, name="Music"):
         parsed = urlparse(normalized)
         is_url = parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
         try:
-            if not is_url:
+            if not is_url and not is_spotify_input(normalized):
                 results = await self.media.search(normalized, limit=5)
                 if not results:
                     return AddInputResult(message="Không tìm thấy kết quả.")

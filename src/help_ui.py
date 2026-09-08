@@ -159,7 +159,7 @@ def _build_overview(prefix: str) -> discord.Embed:
         "**Bắt đầu nhanh**\n"
         f"1. Vào một kênh thoại.\n"
         f"2. Gõ {music} để bot vào phòng và gửi **bảng điều khiển nhạc**.\n"
-        "3. Bấm **Thêm nhạc** để tìm bài, dán URL, hoặc playlist YouTube.\n\n"
+        "3. Bấm **Thêm nhạc** để tìm bài, dán URL YouTube/Spotify, hoặc playlist.\n\n"
         "Chỉ thành viên trong **đúng kênh thoại** của bot mới dùng được nút "
         "và lệnh điều khiển — kể cả quản trị viên cũng phải vào cùng phòng.\n\n"
         f"Chọn chủ đề bên dưới, hoặc dùng {help_cmd} để xem một lệnh cụ thể.",
@@ -176,8 +176,8 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Thêm và phát",
         value=(
-            "**Thêm nhạc** — tên bài, URL video, hoặc playlist YouTube. "
-            "Tìm kiếm hiện tối đa 5 kết quả riêng; playlist thêm tối đa 25 video mỗi lần.\n"
+            "**Thêm nhạc** — tên bài, URL YouTube hoặc Spotify, playlist YouTube/Spotify. "
+            "Tìm kiếm hiện tối đa 5 kết quả riêng; playlist thêm tối đa 25 bài mỗi lần.\n"
             "**Tạm dừng / Tiếp tục** — dừng hoặc phát tiếp bài hiện tại.\n"
             "**Bài tiếp** — bỏ qua bài đang phát, kể cả khi bài đang tải.\n"
             "**Lặp** — bật hoặc tắt lặp bài hiện tại.\n"
@@ -360,7 +360,7 @@ _COMMAND_DETAILS: dict[str, str] = {
         "Cũng có trong form **Cài đặt** trên bảng. Mặc định là tắt."
     ),
     "play": (
-        "Chấp nhận URL video, playlist YouTube, hoặc từ khóa tìm kiếm. "
+        "Chấp nhận URL YouTube, URL Spotify (bài, album, playlist), hoặc từ khóa tìm kiếm. "
         "Nếu bot đang ở kênh khác, hãy vào đúng kênh đó thay vì chuyển bot."
     ),
     "next": "Giống play nhưng luôn thêm vào hàng đợi, không cắt bài hiện tại.",

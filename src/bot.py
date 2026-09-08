@@ -12,6 +12,7 @@ from .config import Settings
 from .help_ui import InteractiveHelpCommand
 from .media import MediaService
 from .player import PlayerManager
+from .spotify import SpotifyService
 from .session import SessionManager
 from .tts import TextToSpeech, normalize_tts_language
 
@@ -30,7 +31,12 @@ class VoiceBot(commands.Bot):
         )
 
         self.settings = settings
-        self.media = MediaService()
+        self.media = MediaService(
+            spotify=SpotifyService(
+                client_id=settings.spotify_client_id,
+                client_secret=settings.spotify_client_secret,
+            )
+        )
         self.tts = TextToSpeech(lang=normalize_tts_language(settings.tts_lang))
         self.sessions = SessionManager(
             self,

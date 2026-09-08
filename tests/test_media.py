@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shlex
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.media import (
     PLAYLIST_LIMIT,
@@ -11,11 +11,14 @@ from src.media import (
     MediaService,
     MediaURLBlockedError,
     QueuedTrack,
+    SearchResult,
     Track,
     _validate_url,
     format_duration,
     parse_jump_timestamp,
+    pick_youtube_match,
 )
+from src.spotify import SpotifyCollection, SpotifyLookupError, SpotifyTrack
 
 
 class FormatDurationTests(unittest.TestCase):
@@ -462,6 +465,449 @@ class URLValidationIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(MediaService, "_extract", return_value=fake_data):
             track = await self.media.resolve("ytsearch1:some song")
         self.assertEqual(track.title, "Song")
+
+
+class SpotifyPreparationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.spotify = MagicMock()
+        self.media = MediaService(spotify=self.spotify)
+
+    async def test_spotify_track_is_matched_to_youtube_and_skips_ytdlp(self) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Song", ("Artist",), 200),),
+            )
+        )
+        youtube = [SearchResult("YT title", "https://youtu.be/matched", 198)]
+
+        with (
+            patch.object(self.media, "search", new=AsyncMock(return_value=youtube)) as search,
+            patch.object(MediaService, "_prepare_url") as prepare_url,
+        ):
+            batch = await self.media.prepare("  https://open.spotify.com/track/abc  ")
+
+        self.assertEqual(
+            batch,
+            MediaBatch(
+                items=(
+                    QueuedTrack(
+                        "Artist - Song",
+                        "https://youtu.be/matched",
+                        198,
+                    ),
+                )
+            ),
+        )
+        self.spotify.lookup.assert_awaited_once_with(
+            "https://open.spotify.com/track/abc",
+            playlist_limit=PLAYLIST_LIMIT,
+        )
+        search.assert_awaited_once_with("Artist - Song", limit=5)
+        prepare_url.assert_not_called()
+
+    async def test_spotify_uri_does_not_go_through_plain_youtube_search(self) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Song", ("Artist",)),),
+            )
+        )
+        with (
+            patch.object(
+                self.media,
+                "search",
+                new=AsyncMock(
+                    return_value=[
+                        SearchResult(
+                            "Artist - Song (Official Audio)",
+                            "https://youtu.be/x",
+                            10,
+                        ),
+                    ]
+                ),
+            ),
+            patch.object(MediaService, "_search") as raw_search,
+        ):
+            await self.media.prepare("spotify:track:abc123")
+
+        raw_search.assert_not_called()
+
+    async def test_spotify_playlist_skips_unmatched_youtube_results(self) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(
+                    SpotifyTrack("Keep", ("A",), 10),
+                    SpotifyTrack("Miss", ("B",), 20),
+                ),
+                is_playlist=True,
+                skipped=1,
+                truncated=True,
+            )
+        )
+
+        async def search(query: str, *, limit: int = 5) -> list[SearchResult]:
+            if query.startswith("A -"):
+                return [SearchResult("YT Keep", "https://youtu.be/keep", 11)]
+            return []
+
+        with patch.object(self.media, "search", side_effect=search):
+            batch = await self.media.prepare(
+                "https://open.spotify.com/playlist/pl1"
+            )
+
+        self.assertEqual(
+            [item.webpage_url for item in batch.items],
+            ["https://youtu.be/keep"],
+        )
+        self.assertEqual(batch.items[0].title, "A - Keep")
+        self.assertTrue(batch.is_playlist)
+        self.assertTrue(batch.truncated)
+        self.assertEqual(batch.skipped, 2)
+
+    async def test_spotify_single_track_without_youtube_match_fails(self) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Song", ("Artist",)),),
+            )
+        )
+        with patch.object(self.media, "search", new=AsyncMock(return_value=[])):
+            with self.assertRaisesRegex(MediaExtractionError, "Không tìm thấy"):
+                await self.media.prepare("spotify:track:abc")
+
+    async def test_spotify_lookup_errors_surface_as_media_errors(self) -> None:
+        self.spotify.lookup = AsyncMock(
+            side_effect=SpotifyLookupError("Liên kết Spotify không hợp lệ")
+        )
+        with self.assertRaisesRegex(MediaExtractionError, "không hợp lệ"):
+            await self.media.prepare("https://open.spotify.com/show/abc")
+
+    async def test_spotify_playlist_picks_official_over_karaoke_and_hour_mix(
+        self,
+    ) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(
+                    SpotifyTrack("Blinding Lights", ("The Weeknd",), 200),
+                ),
+                is_playlist=True,
+            )
+        )
+        results = [
+            SearchResult(
+                "Blinding Lights karaoke version",
+                "https://youtu.be/kara",
+                201,
+            ),
+            SearchResult(
+                "The Weeknd - Blinding Lights (Official Audio)",
+                "https://youtu.be/official",
+                200,
+            ),
+            SearchResult(
+                "Blinding Lights 10 hour",
+                "https://youtu.be/hour",
+                36000,
+            ),
+        ]
+        with patch.object(
+            self.media,
+            "search",
+            new=AsyncMock(return_value=results),
+        ) as search:
+            batch = await self.media.prepare(
+                "https://open.spotify.com/playlist/pl1"
+            )
+
+        self.assertEqual(batch.items[0].webpage_url, "https://youtu.be/official")
+        self.assertEqual(batch.items[0].title, "The Weeknd - Blinding Lights")
+        self.assertTrue(batch.is_playlist)
+        search.assert_awaited_once_with("The Weeknd - Blinding Lights", limit=5)
+
+    async def test_spotify_playlist_skips_tracks_with_only_bad_youtube_hits(
+        self,
+    ) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(
+                    SpotifyTrack("Keep", ("Artist",), 180),
+                    SpotifyTrack("Miss", ("Artist",), 180),
+                ),
+                is_playlist=True,
+            )
+        )
+
+        async def search(query: str, *, limit: int = 5) -> list[SearchResult]:
+            if "Keep" in query:
+                return [
+                    SearchResult(
+                        "Artist - Keep (Official Audio)",
+                        "https://youtu.be/keep",
+                        181,
+                    )
+                ]
+            return [
+                SearchResult("Miss 1 hour mix", "https://youtu.be/mix", 3600),
+                SearchResult("Miss karaoke", "https://youtu.be/kara", 40),
+            ]
+
+        with patch.object(self.media, "search", side_effect=search):
+            batch = await self.media.prepare(
+                "https://open.spotify.com/playlist/pl1"
+            )
+
+        self.assertEqual(
+            [item.webpage_url for item in batch.items],
+            ["https://youtu.be/keep"],
+        )
+        self.assertEqual(batch.skipped, 1)
+        self.assertTrue(batch.is_playlist)
+
+    async def test_spotify_playlist_all_unmatched_fails_unlike_partial_skip(
+        self,
+    ) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Miss", ("Artist",), 180),),
+                is_playlist=True,
+            )
+        )
+        with patch.object(self.media, "search", new=AsyncMock(return_value=[])):
+            with self.assertRaisesRegex(
+                MediaExtractionError,
+                "Playlist không có video khả dụng",
+            ):
+                await self.media.prepare("https://open.spotify.com/playlist/pl1")
+
+    async def test_first_youtube_query_error_falls_through_to_alternate_query(
+        self,
+    ) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Song", ("Artist",), 180),),
+            )
+        )
+        queries: list[str] = []
+
+        async def search(query: str, *, limit: int = 5) -> list[SearchResult]:
+            queries.append(query)
+            if query == "Artist - Song":
+                raise MediaExtractionError("Tìm kiếm YouTube thất bại")
+            return [
+                SearchResult(
+                    "Artist - Song (Official Audio)",
+                    "https://youtu.be/alt",
+                    180,
+                )
+            ]
+
+        with patch.object(self.media, "search", side_effect=search):
+            batch = await self.media.prepare("spotify:track:abc")
+
+        self.assertEqual(queries, ["Artist - Song", "Song Artist"])
+        self.assertEqual(batch.items[0].webpage_url, "https://youtu.be/alt")
+        self.assertFalse(batch.is_playlist)
+
+    async def test_poor_first_youtube_hits_fall_through_to_alternate_query(
+        self,
+    ) -> None:
+        self.spotify.lookup = AsyncMock(
+            return_value=SpotifyCollection(
+                tracks=(SpotifyTrack("Song", ("Artist",), 180),),
+                is_playlist=True,
+            )
+        )
+        queries: list[str] = []
+
+        async def search(query: str, *, limit: int = 5) -> list[SearchResult]:
+            queries.append(query)
+            if query == "Artist - Song":
+                return [
+                    SearchResult(
+                        "unrelated 10 hour mix",
+                        "https://youtu.be/bad",
+                        36000,
+                    )
+                ]
+            return [
+                SearchResult(
+                    "Artist - Song (Official Audio)",
+                    "https://youtu.be/good",
+                    181,
+                )
+            ]
+
+        with patch.object(self.media, "search", side_effect=search):
+            batch = await self.media.prepare(
+                "https://open.spotify.com/playlist/pl1"
+            )
+
+        self.assertEqual(queries, ["Artist - Song", "Song Artist"])
+        self.assertEqual(batch.items[0].webpage_url, "https://youtu.be/good")
+        self.assertTrue(batch.is_playlist)
+        self.assertEqual(batch.skipped, 0)
+
+
+class YoutubeMatchTests(unittest.TestCase):
+    def test_prefers_duration_and_artist_over_first_result(self) -> None:
+        track = SpotifyTrack("Stay", ("The Kid LAROI", "Justin Bieber"), 141)
+        karaoke = SearchResult("Stay karaoke", "https://youtu.be/kara", 142)
+        official = SearchResult(
+            "The Kid LAROI Justin Bieber Stay Official Audio",
+            "https://youtu.be/official",
+            141,
+            uploader="The Kid LAROI - Topic",
+        )
+        hour_mix = SearchResult("Stay 1 hour", "https://youtu.be/hour", 3600)
+
+        picked = pick_youtube_match(track, (karaoke, official, hour_mix))
+
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/official")
+
+    def test_rejects_candidates_with_wildly_different_duration(self) -> None:
+        track = SpotifyTrack("Song", ("Artist",), 200)
+        picked = pick_youtube_match(
+            track,
+            (
+                SearchResult("Artist - Song full album", "https://youtu.be/album", 3400),
+            ),
+        )
+        self.assertIsNone(picked)
+
+    def test_ignores_cover_when_original_is_present(self) -> None:
+        track = SpotifyTrack("drivers license", ("Olivia Rodrigo",), 242)
+        cover = SearchResult(
+            "drivers license cover",
+            "https://youtu.be/cover",
+            240,
+        )
+        original = SearchResult(
+            "Olivia Rodrigo - drivers license (Official Video)",
+            "https://youtu.be/orig",
+            242,
+        )
+        picked = pick_youtube_match(track, (cover, original))
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/orig")
+
+    def test_matches_vietnamese_title_tokens(self) -> None:
+        track = SpotifyTrack("Nơi Này Có Anh", ("Sơn Tùng M-TP",), 260)
+        picked = pick_youtube_match(
+            track,
+            (
+                SearchResult(
+                    "Sơn Tùng M-TP - Nơi Này Có Anh",
+                    "https://youtu.be/vn",
+                    261,
+                ),
+            ),
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/vn")
+
+    def test_returns_none_when_results_are_empty(self) -> None:
+        track = SpotifyTrack("Song", ("Artist",), 120)
+        self.assertIsNone(pick_youtube_match(track, ()))
+
+    def test_skips_blank_youtube_titles_and_uses_next_candidate(self) -> None:
+        track = SpotifyTrack("Song", ("Artist",), 180)
+        picked = pick_youtube_match(
+            track,
+            (
+                SearchResult("   ", "https://youtu.be/blank", 180),
+                SearchResult("", "https://youtu.be/empty", 180),
+                SearchResult("Artist - Song", "https://youtu.be/ok", 181),
+            ),
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/ok")
+
+    def test_missing_durations_still_match_on_title_and_artist(self) -> None:
+        track = SpotifyTrack("Song", ("Artist",))
+        picked = pick_youtube_match(
+            track,
+            (
+                SearchResult(
+                    "Artist - Song Official Audio",
+                    "https://youtu.be/ok",
+                ),
+            ),
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/ok")
+
+    def test_does_not_penalize_remix_when_spotify_title_already_says_remix(
+        self,
+    ) -> None:
+        track = SpotifyTrack("Song (Remix)", ("Artist",), 200)
+        studio = SearchResult("Artist - Song", "https://youtu.be/studio", 200)
+        remix = SearchResult(
+            "Artist - Song Remix Official Audio",
+            "https://youtu.be/remix",
+            200,
+        )
+        picked = pick_youtube_match(track, (studio, remix))
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/remix")
+
+    def test_does_not_penalize_live_when_spotify_title_already_says_live(
+        self,
+    ) -> None:
+        track = SpotifyTrack("Song (Live)", ("Artist",), 200)
+        studio = SearchResult("Artist - Song", "https://youtu.be/studio", 200)
+        live = SearchResult(
+            "Artist - Song Live Official Audio",
+            "https://youtu.be/live",
+            200,
+        )
+        picked = pick_youtube_match(track, (studio, live))
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/live")
+
+    def test_does_not_penalize_karaoke_when_spotify_title_already_says_karaoke(
+        self,
+    ) -> None:
+        track = SpotifyTrack("Song Karaoke", ("Artist",), 200)
+        studio = SearchResult("Artist - Song", "https://youtu.be/studio", 200)
+        karaoke = SearchResult(
+            "Artist - Song Karaoke Official Audio",
+            "https://youtu.be/kara",
+            200,
+        )
+        picked = pick_youtube_match(track, (studio, karaoke))
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/kara")
+
+    def test_short_title_without_artist_or_close_duration_is_rejected(self) -> None:
+        track = SpotifyTrack("Stay", ("Artist",), 180)
+        picked = pick_youtube_match(
+            track,
+            (
+                SearchResult(
+                    "Stay night lofi mix",
+                    "https://youtu.be/lofi",
+                    210,
+                ),
+            ),
+        )
+        self.assertIsNone(picked)
+
+    def test_short_title_with_close_duration_can_match(self) -> None:
+        track = SpotifyTrack("Stay", ("Artist",), 141)
+        picked = pick_youtube_match(
+            track,
+            (SearchResult("Stay", "https://youtu.be/stay", 141),),
+        )
+        self.assertIsNotNone(picked)
+        assert picked is not None
+        self.assertEqual(picked.url, "https://youtu.be/stay")
 
 
 if __name__ == "__main__":

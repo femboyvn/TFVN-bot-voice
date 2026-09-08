@@ -950,6 +950,33 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.cog._enqueue_interaction_batch.assert_not_awaited()
         self.players.get_or_create.assert_not_awaited()
 
+    async def test_ui_add_input_spotify_uri_enqueues_instead_of_searching(
+        self,
+    ) -> None:
+        item = QueuedTrack(
+            "Artist - Song",
+            "https://www.youtube.com/watch?v=matched",
+            200,
+        )
+        batch = MediaBatch(items=(item,))
+        self.media.search = AsyncMock()
+        self.media.prepare = AsyncMock(return_value=batch)
+        self.cog._enqueue_interaction_batch = AsyncMock(return_value=None)
+        interaction = self._make_panel_interaction()
+
+        result = await self.cog.ui_add_input(
+            interaction,
+            1,
+            7,
+            "  spotify:track:abc123  ",
+        )
+
+        self.media.prepare.assert_awaited_once_with("spotify:track:abc123")
+        self.media.search.assert_not_awaited()
+        self.cog._enqueue_interaction_batch.assert_awaited_once()
+        self.assertIn("Artist - Song", result.message)
+        self.assertEqual(result.results, ())
+
     async def test_enqueue_uses_batch_playlist_path(self) -> None:
         item = QueuedTrack(
             "Bài thử",

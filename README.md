@@ -1,7 +1,8 @@
 # TFD Voice Bot
 
 A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports a shared
-Discord music-control panel, URL and YouTube-playlist playback, YouTube search,
+Discord music-control panel, URL and YouTube-playlist playback, Spotify links,
+YouTube search,
 per-server queues, pause/resume, timestamp jumps, skip, looping, TTS "now playing"
 announcements, and **voice-chat sessions** that join a VC and read that channel's text
 chat aloud (via gTTS).
@@ -27,6 +28,12 @@ python -m src
 
 Set `DISCORD_TOKEN` in `.env` before starting the bot. Never commit that file.
 
+Spotify **track** links work without extra credentials (metadata via oEmbed, audio
+via YouTube). Albums, playlists, and artist links need `SPOTIFY_CLIENT_ID` and
+`SPOTIFY_CLIENT_SECRET` from a [Spotify Developer](https://developer.spotify.com/dashboard)
+app. Spotify does not provide audio streams to third-party bots, so each track is
+matched to a YouTube result.
+
 Default TTS language is Vietnamese (`TTS_LANG=vi`). Override with `TTS_LANG=en` if needed.
 
 ## Commands
@@ -40,8 +47,8 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
-| `!tfd play <URL or query>` | Join voice and queue a track |
-| `!tfd next <URL or query>` | Add another track to the queue |
+| `!tfd play <URL or query>` | Join voice and queue a YouTube or Spotify track/playlist |
+| `!tfd next <URL or query>` | Add another track or playlist to the queue |
 | `!tfd pause` | Pause playback |
 | `!tfd resume` | Resume playback |
 | `!tfd jump HH:MM:SS` | Jump to a timestamp in the current track |
@@ -53,7 +60,7 @@ The default prefix is `!tfd `, including the trailing space.
 ### Shared music panel
 
 1. Join a voice channel and run `!tfd music`.
-2. Use **Tìm bài** to enter a search phrase, video URL, or YouTube playlist URL.
+2. Use **Thêm nhạc** to enter a search phrase, YouTube URL, Spotify URL, or playlist URL.
    Plain queries show up to five ephemeral numbered results; press the matching
    **1**–**5** button to append one to the queue.
 3. A playlist appends its available videos in order, inspecting at most the first 25
@@ -140,7 +147,8 @@ src/
   bot.py          # Discord client lifecycle
   config.py       # validated environment settings
   logging.py      # console logging configuration
-  media.py        # yt-dlp and FFmpeg integration
+  media.py        # yt-dlp, Spotify metadata, and FFmpeg integration
+  spotify.py      # Spotify URL parsing and catalog lookup
   player.py       # per-guild queues and playback workers
   session.py      # join-session: monitor VC text chat via TTS
   ducking.py      # mix TTS over music with volume ducking

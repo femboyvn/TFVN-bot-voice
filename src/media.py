@@ -7,6 +7,8 @@ import ipaddress
 import logging
 import re
 import socket
+import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any
@@ -15,7 +17,51 @@ from urllib.parse import urlparse
 import discord
 import yt_dlp
 
+from .spotify import (
+    SpotifyLookupError,
+    SpotifyService,
+    SpotifyTrack,
+    is_spotify_input,
+)
+
 _log = logging.getLogger(__name__)
+
+_SPOTIFY_MATCH_CONCURRENCY = 4
+_SPOTIFY_SEARCH_LIMIT = 5
+_MIN_YOUTUBE_MATCH_SCORE = 25
+_TITLE_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+_PARENTHETICAL_RE = re.compile(r"[\(\[\{].*?[\)\]\}]")
+_FEAT_RE = re.compile(r"\b(?:feat|ft|featuring)\.?\b.*", re.IGNORECASE)
+_TOKEN_STOPWORDS = frozenset({"a", "an", "and", "of", "the", "to"})
+_PENALTY_PHRASES = (
+    "karaoke",
+    "cover",
+    "nightcore",
+    "slowed",
+    "reverb",
+    "sped up",
+    "speed up",
+    "8d",
+    "mashup",
+    "mash up",
+    "remix",
+    "bootleg",
+    "instrumental",
+    "piano",
+    "live",
+    "concert",
+    "1 hour",
+    "10 hour",
+    "hour version",
+    "full album",
+)
+_BONUS_PHRASES = (
+    "official audio",
+    "official video",
+    "official music video",
+    "lyric video",
+    "audio",
+)
 
 
 YTDL_FORMAT_OPTIONS: dict[str, Any] = {
@@ -135,6 +181,7 @@ class SearchResult:
     title: str
     url: str
     duration: int | None = None
+    uploader: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +206,9 @@ class MediaBatch:
 class MediaService:
     """Runs blocking yt-dlp extraction outside the Discord event loop."""
 
+    def __init__(self, spotify: SpotifyService | None = None) -> None:
+        self._spotify = spotify if spotify is not None else SpotifyService()
+
     async def prepare(
         self,
         query: str,
@@ -173,6 +223,10 @@ class MediaService:
             raise ValueError("playlist_limit must be positive")
 
         effective_limit = min(playlist_limit, PLAYLIST_LIMIT)
+        if is_spotify_input(normalized_query):
+            if HTTP_URL_PATTERN.match(normalized_query):
+                _validate_url(normalized_query)
+            return await self._prepare_spotify(normalized_query, effective_limit)
         if not HTTP_URL_PATTERN.match(normalized_query):
             results = await self.search(normalized_query, limit=1)
             if not results:
@@ -256,11 +310,13 @@ class MediaService:
                 continue
             if not url.startswith(("http://", "https://")) and entry.get("id"):
                 url = f"https://www.youtube.com/watch?v={entry['id']}"
+            uploader = entry.get("channel") or entry.get("uploader")
             results.append(
                 SearchResult(
                     title=entry.get("title") or "Không có tiêu đề",
                     url=url,
                     duration=_duration_as_int(entry.get("duration")),
+                    uploader=uploader if isinstance(uploader, str) else None,
                 )
             )
         return results
@@ -364,6 +420,226 @@ class MediaService:
             skipped=skipped,
             truncated=truncated,
         )
+
+    async def _prepare_spotify(
+        self,
+        query: str,
+        playlist_limit: int,
+    ) -> MediaBatch:
+        try:
+            collection = await self._spotify.lookup(
+                query,
+                playlist_limit=playlist_limit,
+            )
+        except SpotifyLookupError as exc:
+            raise MediaExtractionError(str(exc)) from exc
+
+        matched = await self._match_spotify_tracks(collection.tracks)
+        items: list[QueuedTrack] = []
+        youtube_skipped = 0
+        for item in matched:
+            if item is None:
+                youtube_skipped += 1
+                continue
+            items.append(item)
+
+        if not items:
+            if collection.is_playlist:
+                raise MediaExtractionError("Playlist không có video khả dụng")
+            raise MediaExtractionError("Không tìm thấy kết quả YouTube")
+
+        return MediaBatch(
+            items=tuple(items),
+            is_playlist=collection.is_playlist,
+            skipped=collection.skipped + youtube_skipped,
+            truncated=collection.truncated,
+        )
+
+    async def _match_spotify_tracks(
+        self,
+        tracks: tuple[SpotifyTrack, ...],
+    ) -> list[QueuedTrack | None]:
+        semaphore = asyncio.Semaphore(_SPOTIFY_MATCH_CONCURRENCY)
+
+        async def match(track: SpotifyTrack) -> QueuedTrack | None:
+            async with semaphore:
+                result = await self._search_youtube_match(track)
+            if result is None:
+                _log.info(
+                    "No YouTube match for Spotify track %r",
+                    track.display_title,
+                )
+                return None
+            return QueuedTrack(
+                title=track.display_title,
+                webpage_url=result.url,
+                duration=(
+                    result.duration
+                    if result.duration is not None
+                    else track.duration
+                ),
+            )
+
+        return list(await asyncio.gather(*(match(track) for track in tracks)))
+
+    async def _search_youtube_match(
+        self,
+        track: SpotifyTrack,
+    ) -> SearchResult | None:
+        queries = [track.search_query]
+        if track.artists:
+            alternate = f"{track.title} {track.artists[0]}".strip()
+            if alternate and alternate.casefold() != track.search_query.casefold():
+                queries.append(alternate)
+
+        for query in queries:
+            try:
+                results = await self.search(query, limit=_SPOTIFY_SEARCH_LIMIT)
+            except MediaExtractionError:
+                _log.info(
+                    "YouTube search failed for Spotify track %r",
+                    track.display_title,
+                )
+                continue
+            picked = pick_youtube_match(track, results)
+            if picked is not None:
+                return picked
+        return None
+
+
+def pick_youtube_match(
+    track: SpotifyTrack,
+    results: Sequence[SearchResult],
+) -> SearchResult | None:
+    """Pick the YouTube result that best matches a Spotify catalog track.
+
+    Scoring uses title/artist tokens, duration closeness, and penalties for
+    karaoke/cover/live/remix uploads. Returns ``None`` when no candidate is
+    confident enough; playlist matching should skip that track.
+    """
+    best: tuple[int, int, SearchResult] | None = None
+    for index, result in enumerate(results):
+        score = _youtube_match_score(track, result, index)
+        if score is None:
+            continue
+        ranked = (score, -index, result)
+        if best is None or ranked[0] > best[0] or (
+            ranked[0] == best[0] and ranked[1] > best[1]
+        ):
+            best = ranked
+    if best is None or best[0] < _MIN_YOUTUBE_MATCH_SCORE:
+        return None
+    return best[2]
+
+
+def _youtube_match_score(
+    track: SpotifyTrack,
+    result: SearchResult,
+    index: int,
+) -> int | None:
+    result_title = result.title.strip()
+    if not result_title:
+        return None
+
+    duration_score = _duration_match_score(track.duration, result.duration)
+    if duration_score is None:
+        return None
+
+    haystack = _fold_text(f"{result_title} {result.uploader or ''}")
+    haystack_tokens = set(haystack.split())
+    title_core = _core_title(track.title)
+    title_tokens = _significant_tokens(title_core)
+    artist_tokens = _significant_tokens(
+        _fold_text(" ".join(track.artists))
+    )
+
+    score = duration_score + max(0, 5 - index)
+    if title_core and _contains_phrase(haystack, title_core):
+        score += 30
+    if title_tokens:
+        matched_title = sum(1 for token in title_tokens if token in haystack_tokens)
+        score += int(25 * matched_title / len(title_tokens))
+        if matched_title == len(title_tokens):
+            score += 10
+    if artist_tokens:
+        matched_artists = sum(1 for token in artist_tokens if token in haystack_tokens)
+        if matched_artists:
+            score += 10 + int(15 * matched_artists / len(artist_tokens))
+
+    source_blob = _fold_text(f"{track.title} {' '.join(track.artists)}")
+    result_blob = _fold_text(result_title)
+    for phrase in _PENALTY_PHRASES:
+        if _contains_phrase(result_blob, phrase) and not _contains_phrase(
+            source_blob, phrase
+        ):
+            score -= 30
+    for phrase in _BONUS_PHRASES:
+        if _contains_phrase(result_blob, phrase):
+            score += 8
+            break
+    uploader = _fold_text(result.uploader or "")
+    if uploader.endswith("topic") or "vevo" in uploader.split():
+        score += 12
+
+    if len(title_tokens) <= 1 and not artist_tokens and duration_score < 20:
+        return None
+    if len(title_tokens) <= 1 and artist_tokens:
+        if not any(token in haystack_tokens for token in artist_tokens):
+            if duration_score < 30:
+                return None
+    return score
+
+
+def _duration_match_score(
+    expected: int | None,
+    actual: int | None,
+) -> int | None:
+    if expected is None or actual is None:
+        return 0
+    if expected < 0 or actual < 0:
+        return None
+    delta = abs(expected - actual)
+    limit = max(45, int(expected * 0.25))
+    if delta > limit:
+        return None
+    if delta <= 5:
+        return 35
+    if delta <= 12:
+        return 22
+    if delta <= 25:
+        return 10
+    return 0
+
+
+def _fold_text(value: str) -> str:
+    text = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(_TITLE_TOKEN_RE.findall(text))
+
+
+def _contains_phrase(haystack: str, phrase: str) -> bool:
+    needle = _fold_text(phrase)
+    if not needle or not haystack:
+        return False
+    return f" {needle} " in f" {haystack} "
+
+
+def _core_title(value: str) -> str:
+    stripped = _PARENTHETICAL_RE.sub(" ", value)
+    stripped = _FEAT_RE.sub(" ", stripped)
+    return _fold_text(stripped)
+
+
+def _significant_tokens(value: str) -> tuple[str, ...]:
+    tokens = []
+    seen: set[str] = set()
+    for token in value.split():
+        if token in _TOKEN_STOPWORDS or token in seen:
+            continue
+        if len(token) < 2 and not token.isdigit():
+            continue
+        seen.add(token)
+        tokens.append(token)
+    return tuple(tokens)
 
 
 def format_duration(duration: int | None) -> str:

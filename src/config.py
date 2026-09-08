@@ -62,6 +62,10 @@ class Settings:
     tts_lang: str = "vi"
     # Music gain (0–1) while session/chat TTS is mixed over a playing track.
     music_duck_level: float = 0.2
+    # Optional Spotify Web API credentials. Track URLs still work via oEmbed
+    # without them; albums, playlists, and artist links require both values.
+    spotify_client_id: str = ""
+    spotify_client_secret: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls, environment: Mapping[str, str] | None = None) -> Settings:
@@ -81,6 +85,13 @@ class Settings:
                 "TTS_LANG must be a supported gTTS language code"
             ) from exc
 
+        spotify_client_id = environment.get("SPOTIFY_CLIENT_ID", "").strip()
+        spotify_client_secret = environment.get("SPOTIFY_CLIENT_SECRET", "").strip()
+        if bool(spotify_client_id) != bool(spotify_client_secret):
+            raise ConfigurationError(
+                "SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must both be set"
+            )
+
         settings = cls(
             discord_token=token,
             command_prefix=environment.get("COMMAND_PREFIX", "!tfd "),
@@ -94,6 +105,8 @@ class Settings:
             tts_enabled=_read_bool(environment, "TTS_ENABLED", True),
             tts_lang=tts_lang,
             music_duck_level=_read_float(environment, "MUSIC_DUCK_LEVEL", 0.2),
+            spotify_client_id=spotify_client_id,
+            spotify_client_secret=spotify_client_secret,
         )
         settings._validate()
         return settings

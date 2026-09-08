@@ -520,8 +520,8 @@ class SearchResultView(_RequesterView):
 
 class AddMusicModal(discord.ui.Modal, title="Tìm / thêm nhạc"):
     query = discord.ui.TextInput(
-        label="Tên bài, URL video hoặc playlist YouTube",
-        placeholder="Nhập nội dung tìm kiếm hoặc dán liên kết…",
+        label="Tên bài, URL YouTube hoặc Spotify",
+        placeholder="Nhập tên bài, dán YouTube hoặc Spotify…",
         required=True,
         max_length=500,
     )

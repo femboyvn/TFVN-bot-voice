@@ -44,6 +44,7 @@ class HelpCopyTests(unittest.TestCase):
         self.assertEqual(embed.title, "Trợ giúp TFD Voice")
         self.assertIn("`!tfd music`", embed.description)
         self.assertIn("`!tfd help [lệnh]`", embed.description)
+        self.assertIn("Spotify", embed.description or "")
         self.assertLessEqual(len(embed.description or ""), 4096)
 
     def test_unknown_page_falls_back_to_overview(self) -> None:
@@ -70,6 +71,7 @@ class HelpCopyTests(unittest.TestCase):
         ):
             self.assertIn(label, values)
         self.assertIn("`!bot music`", embed.description)
+        self.assertIn("Spotify", values)
         for field in embed.fields:
             self.assertLessEqual(len(field.value), 1024)
 

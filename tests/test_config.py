@@ -15,6 +15,8 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tts_enabled)
         self.assertEqual(settings.tts_lang, "vi")
         self.assertEqual(settings.music_duck_level, 0.2)
+        self.assertEqual(settings.spotify_client_id, "")
+        self.assertEqual(settings.spotify_client_secret, "")
         self.assertNotIn("secret", repr(settings))
 
     def test_loads_overrides(self) -> None:
@@ -29,6 +31,8 @@ class SettingsTests(unittest.TestCase):
                 "TTS_ENABLED": "false",
                 "TTS_LANG": "vi",
                 "MUSIC_DUCK_LEVEL": "0.15",
+                "SPOTIFY_CLIENT_ID": "spot-id",
+                "SPOTIFY_CLIENT_SECRET": "spot-secret",
             }
         )
 
@@ -40,6 +44,9 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tts_enabled)
         self.assertEqual(settings.tts_lang, "vi")
         self.assertEqual(settings.music_duck_level, 0.15)
+        self.assertEqual(settings.spotify_client_id, "spot-id")
+        self.assertEqual(settings.spotify_client_secret, "spot-secret")
+        self.assertNotIn("spot-secret", repr(settings))
 
     def test_canonicalizes_tts_language_code(self) -> None:
         settings = Settings.from_env(
@@ -67,6 +74,55 @@ class SettingsTests(unittest.TestCase):
     def test_rejects_invalid_volume(self) -> None:
         with self.assertRaisesRegex(ConfigurationError, "DEFAULT_VOLUME"):
             Settings.from_env({"DISCORD_TOKEN": "secret", "DEFAULT_VOLUME": "3"})
+
+    def test_rejects_partial_spotify_credentials(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "SPOTIFY_CLIENT"):
+            Settings.from_env(
+                {
+                    "DISCORD_TOKEN": "secret",
+                    "SPOTIFY_CLIENT_ID": "only-id",
+                }
+            )
+        with self.assertRaisesRegex(ConfigurationError, "SPOTIFY_CLIENT"):
+            Settings.from_env(
+                {
+                    "DISCORD_TOKEN": "secret",
+                    "SPOTIFY_CLIENT_SECRET": "only-secret",
+                }
+            )
+
+    def test_strips_spotify_credentials(self) -> None:
+        settings = Settings.from_env(
+            {
+                "DISCORD_TOKEN": "secret",
+                "SPOTIFY_CLIENT_ID": "  spot-id  ",
+                "SPOTIFY_CLIENT_SECRET": "  spot-secret  ",
+            }
+        )
+        self.assertEqual(settings.spotify_client_id, "spot-id")
+        self.assertEqual(settings.spotify_client_secret, "spot-secret")
+        self.assertNotIn("spot-secret", repr(settings))
+
+    def test_whitespace_only_spotify_pair_is_treated_as_unset(self) -> None:
+        settings = Settings.from_env(
+            {
+                "DISCORD_TOKEN": "secret",
+                "SPOTIFY_CLIENT_ID": "   ",
+                "SPOTIFY_CLIENT_SECRET": "   ",
+            }
+        )
+        self.assertEqual(settings.spotify_client_id, "")
+        self.assertEqual(settings.spotify_client_secret, "")
+
+    def test_whitespace_only_spotify_secret_is_treated_as_missing(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "SPOTIFY_CLIENT"):
+            Settings.from_env(
+                {
+                    "DISCORD_TOKEN": "secret",
+                    "SPOTIFY_CLIENT_ID": "spot-id",
+                    "SPOTIFY_CLIENT_SECRET": "   ",
+                }
+            )
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Application code lives in `src/`. `src/bot.py` builds the Discord client, `src/cogs/music.py` defines user commands, `src/player.py` owns per-guild playback, and `src/media.py` integrates yt-dlp and FFmpeg. Voice sessions, TTS, ducking, and configuration are kept in their matching modules. `main.py` is a compatibility entry point. Tests live in `tests/` and mirror source concerns, for example `tests/test_player.py`. Docker configuration is in `Dockerfile` and `compose.yaml`; CI workflows are under `.github/workflows/`.
+Application code lives in `src/`. `src/bot.py` builds the Discord client, `src/cogs/music.py` defines user commands, `src/player.py` owns per-guild playback, and `src/media.py` integrates yt-dlp, Spotify-to-YouTube matching, and FFmpeg. `src/spotify.py` parses Spotify URLs/URIs and fetches catalog metadata (tracks, albums, playlists, artists). Voice sessions, TTS, ducking, and configuration are kept in their matching modules. `main.py` is a compatibility entry point. Tests live in `tests/` and mirror source concerns, for example `tests/test_player.py`. Docker configuration is in `Dockerfile` and `compose.yaml`; CI workflows are under `.github/workflows/`.
 
 ## Build, Test, and Development Commands
 
@@ -18,7 +18,7 @@ Target Python 3.12 and use four-space indentation, type annotations, and focused
 
 ## Testing Guidelines
 
-Tests use the standard-library `unittest` framework, including `IsolatedAsyncioTestCase` and mocks for Discord clients. Name files `test_<area>.py` and methods `test_<behavior>`. Add regression tests for command replies, queue state, error paths, and asynchronous cleanup. Run both compilation and the full suite before submitting.
+Tests use the standard-library `unittest` framework, including `IsolatedAsyncioTestCase` and mocks for Discord clients. Name files `test_<area>.py` and methods `test_<behavior>`. Add regression tests for command replies, queue state, error paths, and asynchronous cleanup. Put Spotify URL-parsing, catalog-lookup, YouTube match-scoring, and playlist skip-versus-fail edge cases in `tests/test_<area>.py` (typically `tests/test_spotify.py` and `tests/test_media.py`); drive the shipped functions and inject HTTP or search only at the I/O boundary. Run both compilation and the full suite before submitting.
 
 ## Commit & Pull Request Guidelines
 
@@ -26,4 +26,4 @@ Recent commits use short, imperative, sentence-style subjects such as `Add audio
 
 ## Security & Configuration Tips
 
-Copy `.env.example` to `.env` and never commit tokens. Keep `DISCORD_TOKEN` private, validate new environment settings in `src/config.py`, and preserve the container's unprivileged user and read-only filesystem controls.
+Copy `.env.example` to `.env` and never commit tokens. Keep `DISCORD_TOKEN` private, validate new environment settings in `src/config.py`, and preserve the container's unprivileged user and read-only filesystem controls. `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` must both be set or both omitted (whitespace-only values count as omitted); albums, playlists, and artist links need both, while track links still work via oEmbed without them.
