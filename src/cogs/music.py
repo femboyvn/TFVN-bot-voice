@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,6 +43,7 @@ from ..player import (
     PlayerManager,
     PlayerSnapshot,
 )
+from ..playlists import PlaylistError, PlaylistStore, SavedPlaylist
 from ..session import SessionManager
 from ..soundboard import (
     SoundboardEntry,
@@ -70,6 +74,7 @@ class MusicCog(commands.Cog, name="Music"):
         players: PlayerManager,
         sessions: SessionManager,
         soundboard: SoundboardService | None = None,
+        playlists: PlaylistStore | None = None,
     ) -> None:
         self.bot = bot
         self.settings = settings
@@ -78,6 +83,11 @@ class MusicCog(commands.Cog, name="Music"):
         self.sessions = sessions
         self.soundboard_service = soundboard or SoundboardService.from_settings(
             settings
+        )
+        self.playlists = playlists or PlaylistStore(
+            Path(str(settings.playlist_db_path)),
+            max_per_user=settings.playlist_max_per_user,
+            max_tracks=settings.playlist_max_tracks,
         )
         self.music_ui = MusicPanelManager(
             self,
@@ -137,6 +147,136 @@ class MusicCog(commands.Cog, name="Music"):
             "Tin nhắn tại đó sẽ được đọc bằng TTS. Dùng "
             f"`{ctx.prefix}leave` để thoát."
         )
+
+    @commands.command(name="playlist")
+    @commands.guild_only()
+    async def playlist(
+        self, ctx: commands.Context[Any], *, arguments: str = "",
+    ) -> None:
+        """Manage personal playlists; quote names containing spaces."""
+        try:
+            args = shlex.split(arguments)
+        except ValueError:
+            await ctx.send("Dấu ngoặc kép chưa đóng. Hãy kiểm tra tên danh sách.")
+            return
+        action = args.pop(0).lower() if args else "list"
+        try:
+            if action in {"list", "show"}:
+                if action == "show" and not args:
+                    raise PlaylistError("Hãy nhập tên danh sách cần xem.")
+                from ..playlist_ui import PlaylistLauncher
+
+                view = PlaylistLauncher(
+                    self, ctx.guild.id, ctx.author.id,
+                    ref=" ".join(args) if action == "show" else "",
+                )
+                view.message = await ctx.send(
+                    "Bấm để mở danh sách phát riêng của bạn.", view=view,
+                )
+                return
+            if action == "play":
+                if not await self._preflight_voice_connection(ctx):
+                    return
+                saved = await self.playlists.get(
+                    ctx.guild.id, ctx.author.id, " ".join(args),
+                )
+                self._require_playlist_tracks(saved)
+                if not await self._enqueue_prepared(
+                    ctx, MediaBatch(items=saved.tracks, is_playlist=True),
+                ):
+                    return
+                message = f"Đã thêm {len(saved.tracks)} bài vào hàng đợi."
+            elif action == "save":
+                async with self._operation_lock(ctx.guild.id):
+                    if not await self._require_voice_control(ctx):
+                        return
+                    tracks = self._playlist_queue_snapshot(ctx.guild.id)
+                    saved = await self.playlists.create(
+                        ctx.guild.id, ctx.author.id, " ".join(args), tracks,
+                    )
+                message = self._playlist_saved_message(saved)
+            else:
+                # The final argument may contain spaces without quoting;
+                # references preceding it should be quoted when necessary.
+                if action == "create" and args:
+                    args = [" ".join(args)]
+                elif action in {"add", "rename"} and len(args) >= 2:
+                    args = [args[0], " ".join(args[1:])]
+                async with ctx.typing():
+                    message = await self._edit_playlist(
+                        ctx.guild.id, ctx.author.id, action, args,
+                    )
+        except (PlaylistError, MediaExtractionError) as exc:
+            message = str(exc)
+        await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+
+    @staticmethod
+    def _playlist_saved_message(saved: SavedPlaylist) -> str:
+        name = discord.utils.escape_mentions(
+            discord.utils.escape_markdown(saved.name)
+        )
+        return f"Đã lưu **{name}** ({len(saved.tracks)} bài)."
+
+    @staticmethod
+    def _require_playlist_tracks(saved: SavedPlaylist) -> None:
+        if not saved.tracks:
+            raise PlaylistError("Danh sách trống. Hãy thêm bài trước khi phát.")
+
+    def _playlist_queue_snapshot(self, guild_id: int) -> tuple[QueuedTrack, ...]:
+        snapshot = self.ui_snapshot(guild_id)
+        tracks = (
+            ((snapshot.current,) if snapshot.current is not None else ())
+            + snapshot.queued
+            if snapshot is not None else ()
+        )
+        if not tracks:
+            raise PlaylistError("Không có bài nào để lưu.")
+        return tracks
+
+    async def _edit_playlist(
+        self, guild_id: int, owner_id: int, action: str, args: list[str],
+        *, guard: Callable[[], None] | None = None,
+        expected_revision: int | None = None,
+    ) -> str:
+        arity = {"create": 1, "add": 2, "rename": 2, "remove": 2,
+                 "move": 3, "delete": 1}
+        if action not in arity or len(args) != arity[action]:
+            raise PlaylistError(
+                "Cú pháp chưa đúng. Xem lệnh playlist trong menu Trợ giúp. "
+                'Đặt tên có khoảng trắng trong dấu ngoặc kép: "Nhạc tối".'
+            )
+        ref = args[0]
+        if action == "create":
+            saved = await self.playlists.create(guild_id, owner_id, ref)
+        elif action == "add":
+            # Resolve ownership before doing HTTP/search work.
+            await self.playlists.get(guild_id, owner_id, ref)
+            batch = await self.media.prepare(args[1])
+            if guard is not None:
+                guard()
+            saved = await self.playlists.append(guild_id, owner_id, ref, batch.items)
+            message = self._playlist_saved_message(saved)
+            if batch.skipped:
+                message += f" Đã bỏ qua {batch.skipped} bài không khả dụng."
+            if batch.truncated:
+                message += " Nguồn có thêm bài; chỉ nhập tối đa 25 bài mỗi lần."
+            return message
+        elif action == "rename":
+            saved = await self.playlists.rename(guild_id, owner_id, ref, args[1])
+        elif action == "delete":
+            await self.playlists.delete(guild_id, owner_id, ref)
+            return "Đã xóa danh sách phát."
+        else:
+            try:
+                position = int(args[1])
+                destination = int(args[2]) if action == "move" else None
+            except ValueError as exc:
+                raise PlaylistError("Số thứ tự bài hát phải là số nguyên.") from exc
+            saved = await self.playlists.edit_track(
+                guild_id, owner_id, ref, position, destination=destination,
+                expected_revision=expected_revision,
+            )
+        return self._playlist_saved_message(saved)
 
     @commands.command()
     @commands.guild_only()
@@ -409,9 +549,16 @@ class MusicCog(commands.Cog, name="Music"):
                 await ctx.send(str(exc))
                 return
 
+        if await self._enqueue_prepared(ctx, batch):
+            await ctx.send(self._format_enqueue_confirmation(batch, confirmation))
+
+    async def _enqueue_prepared(
+        self, ctx: commands.Context[Any], batch: MediaBatch,
+    ) -> bool:
+        """Append prepared metadata after rechecking room access under the lock."""
         async with self._operation_lock(ctx.guild.id):
             if not await self._preflight_voice_connection(ctx):
-                return
+                return False
             # Touch an existing player before connecting so its idle deadline
             # cannot tear down the voice client during this operation.
             player = await self.players.get_or_create(ctx.guild)
@@ -419,11 +566,98 @@ class MusicCog(commands.Cog, name="Music"):
             try:
                 voice_client = await self._connect_for_context(ctx)
                 if voice_client is None:
-                    return
+                    return False
                 await player.enqueue_many(batch.items, ctx.channel)
             finally:
                 player.release_activity()
-        await ctx.send(self._format_enqueue_confirmation(batch, confirmation))
+        return True
+
+    async def ui_list_playlists(
+        self, guild_id: int, owner_id: int,
+    ) -> tuple[SavedPlaylist, ...]:
+        return await self.playlists.list(guild_id, owner_id)
+
+    def _playlist_interaction_guard(
+        self, interaction: discord.Interaction, guild_id: int,
+        voice_channel_id: int | None,
+    ) -> None:
+        if interaction.guild is None or interaction.guild.id != guild_id:
+            raise PlaylistError("Danh sách này chỉ dùng được trong máy chủ.")
+        if voice_channel_id is not None:
+            error = self._interaction_access_error(
+                interaction, guild_id, voice_channel_id, allow_disconnected=True,
+            )
+            if error:
+                raise PlaylistError(error)
+
+    async def ui_playlist_search(
+        self, interaction: discord.Interaction, guild_id: int, ref: str,
+        query: str, voice_channel_id: int | None = None,
+    ) -> tuple[SearchResult, ...]:
+        self._playlist_interaction_guard(interaction, guild_id, voice_channel_id)
+        await self.playlists.get(guild_id, interaction.user.id, ref)
+        results = await self.media.search(query, limit=5)
+        self._playlist_interaction_guard(interaction, guild_id, voice_channel_id)
+        return tuple(results)
+
+    async def ui_playlist_action(
+        self, interaction: discord.Interaction, guild_id: int, action: str,
+        args: list[str], voice_channel_id: int | None = None,
+        *, expected_revision: int | None = None,
+    ) -> str:
+        def guard() -> None:
+            self._playlist_interaction_guard(
+                interaction, guild_id, voice_channel_id,
+            )
+
+        try:
+            guard()
+            if action not in {"save", "play"}:
+                return await self._edit_playlist(
+                    guild_id, interaction.user.id, action, args, guard=guard,
+                    expected_revision=expected_revision,
+                )
+            if len(args) != 1:
+                raise PlaylistError("Hãy nhập tên danh sách phát.")
+            channel_id = voice_channel_id
+            if channel_id is None:
+                member_channel = member_voice_channel(interaction.user)
+                if member_channel is None:
+                    raise PlaylistError("Hãy vào một kênh thoại trước.")
+                session = self.sessions.get(guild_id)
+                channel_id = (
+                    session.voice_channel_id if session is not None and session.active
+                    else member_channel.id
+                )
+            if action == "play":
+                error = self._interaction_access_error(
+                    interaction, guild_id, channel_id, allow_disconnected=True,
+                )
+                if error:
+                    return error
+                saved = await self.playlists.get(guild_id, interaction.user.id, args[0])
+                self._require_playlist_tracks(saved)
+                error = await self._enqueue_interaction_batch(
+                    interaction, guild_id, channel_id,
+                    MediaBatch(items=saved.tracks, is_playlist=True),
+                )
+                return error or f"Đã thêm {len(saved.tracks)} bài vào hàng đợi."
+            async with self._operation_lock(guild_id):
+                error = self._interaction_access_error(
+                    interaction, guild_id, channel_id,
+                )
+                if error:
+                    return error
+                tracks = self._playlist_queue_snapshot(guild_id)
+                saved = await self.playlists.create(
+                    guild_id, interaction.user.id, args[0], tracks,
+                )
+                return self._playlist_saved_message(saved)
+        except (PlaylistError, MediaExtractionError) as exc:
+            return str(exc)
+        except Exception:
+            log.exception("Playlist interaction failed in guild %s", guild_id)
+            return "Không cập nhật được danh sách phát. Hãy thử lại."
 
     async def _connect_for_context(
         self,

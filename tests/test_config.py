@@ -227,6 +227,43 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.soundboard_data_dir, "data/soundboard")
 
+    def test_playlist_defaults_and_overrides(self) -> None:
+        defaults = Settings.from_env({"DISCORD_TOKEN": "secret"})
+        self.assertEqual(defaults.playlist_db_path, "data/playlists/playlists.db")
+        self.assertEqual(defaults.playlist_backup_minutes, 0)
+        self.assertEqual(defaults.playlist_max_per_user, 20)
+        self.assertEqual(defaults.playlist_max_tracks, 100)
+        settings = Settings.from_env({
+            "DISCORD_TOKEN": "secret", "PLAYLIST_DB_PATH": " /data/playlists/playlists.db ",
+            "PLAYLIST_MAX_PER_USER": "50", "PLAYLIST_MAX_TRACKS": "250",
+        })
+        self.assertEqual(settings.playlist_db_path, "/data/playlists/playlists.db")
+        self.assertEqual(settings.playlist_max_per_user, 50)
+        self.assertEqual(settings.playlist_max_tracks, 250)
+        blank = Settings.from_env({"DISCORD_TOKEN": "secret", "PLAYLIST_DB_PATH": " "})
+        self.assertEqual(blank.playlist_db_path, defaults.playlist_db_path)
+
+    def test_invalid_playlist_configuration_is_rejected(self) -> None:
+        for key, value in (
+            ("PLAYLIST_DB_PATH", ":memory:"), ("PLAYLIST_DB_PATH", "/"),
+            ("PLAYLIST_DB_PATH", "bad\x00path"),
+            ("PLAYLIST_MAX_PER_USER", "0"), ("PLAYLIST_MAX_PER_USER", "101"),
+            ("PLAYLIST_MAX_TRACKS", "0"), ("PLAYLIST_MAX_TRACKS", "1001"),
+            ("PLAYLIST_BACKUP_MINUTES", "-1"), ("PLAYLIST_BACKUP_MINUTES", "10081"),
+            ("PLAYLIST_MAX_TRACKS", "1.5"),
+        ):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(ConfigurationError, key):
+                    Settings.from_env({"DISCORD_TOKEN": "secret", key: value})
+
+    def test_playlist_backups_require_r2_and_accept_complete_configuration(self) -> None:
+        environment = {"DISCORD_TOKEN": "secret", "PLAYLIST_BACKUP_MINUTES": "60"}
+        with self.assertRaisesRegex(ConfigurationError, "requires R2"):
+            Settings.from_env(environment)
+        environment.update({"R2_BUCKET": "bucket", "R2_ACCOUNT_ID": "account",
+                            "R2_ACCESS_KEY_ID": "key", "R2_SECRET_ACCESS_KEY": "secret"})
+        self.assertEqual(Settings.from_env(environment).playlist_backup_minutes, 60)
+
 
 if __name__ == "__main__":
     unittest.main()

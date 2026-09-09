@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
@@ -241,23 +242,26 @@ class SoundboardIngestTests(unittest.TestCase):
         def encode(src: Path, dest: Path, max_seconds: int) -> int:
             recorded["src"] = src.read_bytes()
             recorded["max_seconds"] = max_seconds
+            self.assertTrue(src.is_relative_to(output.parent))
+            self.assertTrue(dest.is_relative_to(output.parent))
             dest.write_bytes(b"ID3encoded")
             return 1500
 
         ingest = SoundboardIngest(fetch=fetch, encode=encode)
         with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "out.mp3"
+            output = Path(tmp) / "nested" / "out.mp3"
             with patch("src.soundboard._validate_url"):
                 duration = ingest.materialize(
                     "https://cdn.discordapp.com/attachments/1/2/a.mp3",
-                    dest,
+                    output,
                     max_seconds=12,
                     max_bytes=1500,
                 )
             self.assertEqual(duration, 1500)
-            self.assertEqual(dest.read_bytes(), b"ID3encoded")
+            self.assertEqual(output.read_bytes(), b"ID3encoded")
             self.assertEqual(recorded["max_seconds"], 12)
             self.assertEqual(recorded["src"], b"ID3payload")
+            self.assertEqual(list(output.parent.iterdir()), [output])
 
     def test_myinstants_page_uses_og_audio(self) -> None:
         html = (
@@ -396,6 +400,70 @@ class SoundboardServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(path)
         assert path is not None
         self.assertEqual(path.read_bytes(), b"ID3out")
+
+    async def test_add_sound_with_data_on_separate_filesystem(self) -> None:
+        root = self.service.store.root.resolve()
+        real_replace = os.replace
+
+        def replace(source: str | Path, destination: str | Path) -> None:
+            source_on_volume = Path(source).resolve().is_relative_to(root)
+            destination_on_volume = Path(destination).resolve().is_relative_to(root)
+            if source_on_volume != destination_on_volume:
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            real_replace(source, destination)
+
+        for guild_id, remote in ((5, None), (6, DictObjectStore())):
+            with self.subTest(remote=remote is not None):
+                self.service.store.remote = remote
+                with (
+                    patch("src.soundboard._validate_url"),
+                    patch("src.soundboard.os.replace", side_effect=replace),
+                ):
+                    entry = await self.service.add_sound(
+                        guild_id,
+                        name="Bruh",
+                        url="https://files.example/a.mp3",
+                        added_by=42,
+                    )
+                self.assertEqual(await self.service.list(guild_id), (entry,))
+                path = await self.service.ensure_playable(guild_id, entry)
+                self.assertIsNotNone(path)
+                assert path is not None
+                self.assertEqual(path.read_bytes(), b"ID3out")
+                self.assertEqual(
+                    set(path.parent.iterdir()),
+                    {path, path.parent / INDEX_FILENAME},
+                )
+                if remote is not None:
+                    self.assertEqual(
+                        remote.objects[f"{guild_id}/{entry.mp3}"],
+                        b"ID3out",
+                    )
+                    index = json.loads(remote.objects[f"{guild_id}/{INDEX_FILENAME}"])
+                    self.assertEqual(index["sounds"][0]["id"], entry.id)
+
+    async def test_add_sound_cleans_staging_after_encode_failure(self) -> None:
+        def encode(src: Path, dest: Path, max_seconds: int) -> int:
+            dest.write_bytes(b"ID3partial")
+            raise SoundboardError("Không mã hóa được âm thanh.")
+
+        self.service.ingest = SoundboardIngest(
+            fetch=lambda url, max_bytes: (b"ID3src", "audio/mpeg"),
+            encode=encode,
+        )
+        with patch("src.soundboard._validate_url"):
+            with self.assertRaisesRegex(SoundboardError, "Không mã hóa"):
+                await self.service.add_sound(
+                    5,
+                    name="Bruh",
+                    url="https://files.example/a.mp3",
+                    added_by=42,
+                )
+        self.assertEqual(await self.service.list(5), ())
+        self.assertFalse(
+            any(path.is_file() for path in self.service.store.root.rglob("*"))
+        )
+        self.assertFalse(list(self.service.store.root.rglob("tfd-soundboard-*")))
 
     async def test_remove_requires_owner(self) -> None:
         with patch("src.soundboard._validate_url"):

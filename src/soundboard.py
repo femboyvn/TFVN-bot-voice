@@ -910,7 +910,11 @@ class SoundboardIngest:
         """Write an encoded MP3 to *dest_mp3* and return duration in milliseconds."""
         kind = classify_soundboard_url(url)
         raw_limit = max(max_bytes * 8, 8 * 1024 * 1024)
-        with tempfile.TemporaryDirectory(prefix="tfd-soundboard-") as tmp:
+        dest_mp3.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix="tfd-soundboard-",
+            dir=str(dest_mp3.parent),
+        ) as tmp:
             tmpdir = Path(tmp)
             source = self._download_source(
                 url,
@@ -926,7 +930,6 @@ class SoundboardIngest:
             size = encoded.stat().st_size
             if size > max_bytes:
                 raise SoundboardError("Tệp âm thanh quá lớn.")
-            dest_mp3.parent.mkdir(parents=True, exist_ok=True)
             os.replace(encoded, dest_mp3)
             return duration_ms
 
@@ -1043,7 +1046,14 @@ class SoundboardService:
             raise SoundboardError("Đã có âm thanh trùng tên.")
 
         sound_id = uuid.uuid4().hex[:8]
-        handle, tmp_name = tempfile.mkstemp(prefix=f"sb-{sound_id}-", suffix=".mp3")
+        directory = self.store.guild_dir(guild_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        # Stage on the destination volume so os.replace stays atomic.
+        handle, tmp_name = tempfile.mkstemp(
+            prefix=f"sb-{sound_id}-",
+            suffix=".mp3",
+            dir=str(directory),
+        )
         os.close(handle)
         tmp_path = Path(tmp_name)
         try:

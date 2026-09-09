@@ -1216,6 +1216,10 @@ class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
         clip = self._clip()
 
         async def pump_mixer() -> None:
+            # Source construction runs in a thread; wait for injection before
+            # treating an inactive secondary as the end of the clip.
+            while not mixer.is_ducking:
+                await asyncio.sleep(0)
             for _ in range(10):
                 await asyncio.sleep(0)
                 mixer.read()
@@ -1233,6 +1237,9 @@ class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
                 pump.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await pump
+
+                # Unblock the worker's Event.wait even if the assertion times out.
+                mixer.clear_secondary()
 
         self.assertTrue(ok)
         voice_client.play.assert_not_called()

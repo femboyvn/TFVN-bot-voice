@@ -19,6 +19,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
+RUN mkdir -p /data/playlists && chown bot:bot /data/playlists
+
 COPY --chown=bot:bot main.py ./
 COPY --chown=bot:bot src ./src
 

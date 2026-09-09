@@ -31,6 +31,10 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Vào kênh thoại, gửi bảng nhạc, và mở bảng âm thanh tùy chỉnh.",
     ),
+    "playlist": (
+        "[list | show | create | add | save | play | rename | remove | move | delete]",
+        "Tạo, sửa, lưu hàng đợi và phát danh sách cá nhân trong máy chủ.",
+    ),
     "join": (
         "",
         "Vào kênh thoại và bắt đầu đọc chat văn bản của kênh đó bằng TTS.",
@@ -200,6 +204,16 @@ def _build_panel(prefix: str) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="Danh sách phát",
+        value=(
+            "**My Playlist** — thư viện riêng của bạn trong máy chủ. "
+            "Tạo, tìm và thêm bài, đổi thứ tự, xóa bài, hoặc lưu bài hiện tại "
+            "cùng hàng đợi. **Phát** thêm vào cuối hàng đợi. "
+            "Danh sách vẫn còn sau khi bot khởi động lại."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Giọng nói và phòng",
         value=(
             "**Đọc tên bài** — đọc to tiêu đề khi bài mới bắt đầu. "
@@ -259,6 +273,11 @@ def _build_commands(prefix: str) -> discord.Embed:
             f"{_command(prefix, 'help')} mở menu này. "
             f"{_command(prefix, 'help', COMMAND_HELP['help'][0])} xem một lệnh."
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Danh sách cá nhân",
+        value=_command_lines(prefix, ("playlist",)),
         inline=False,
     )
     return embed
@@ -350,6 +369,22 @@ _PAGE_BUILDERS = {
 }
 
 _COMMAND_DETAILS: dict[str, str] = {
+    "playlist": (
+        "Không có tham số: mở nút vào thư viện riêng.\n"
+        '`playlist create "Nhạc tối"` — tạo danh sách.\n'
+        '`playlist add "Nhạc tối" <URL hoặc từ khóa>` — thêm bài; '
+        "từ khóa lấy kết quả đầu tiên, nút **Thêm bài** cho chọn 5 kết quả.\n"
+        '`playlist save "Nhạc tối"` — tạo danh sách từ bài hiện tại và hàng đợi.\n'
+        '`playlist play "Nhạc tối"` — thêm toàn bộ vào cuối hàng đợi.\n'
+        '`playlist show "Nhạc tối"` — xem các bài.\n'
+        '`playlist rename "Nhạc tối" "Nhạc mới"` — đổi tên.\n'
+        '`playlist remove "Nhạc tối" 2` — xóa bài số 2.\n'
+        '`playlist move "Nhạc tối" 3 1` — chuyển bài 3 lên vị trí 1.\n'
+        '`playlist delete "Nhạc tối"` — xóa danh sách.\n'
+        "Thêm tiền tố bot trước các ví dụ. Chỉ chủ danh sách truy cập được; "
+        "phát và lưu hàng đợi yêu cầu ở cùng phòng thoại với bot. "
+        "Mỗi lần nhập URL playlist ngoài xét tối đa 25 bài."
+    ),
     "music": (
         "Chỉ có một bảng hoạt động trên mỗi máy chủ. Mở bảng mới sẽ tắt bảng cũ. "
         "Sau khi bot khởi động lại, chạy lại lệnh này."

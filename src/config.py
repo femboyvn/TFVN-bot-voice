@@ -17,6 +17,7 @@ DEFAULT_SOUNDBOARD_MAX_SOUNDS = 40
 DEFAULT_SOUNDBOARD_MAX_BYTES = 1_500_000
 DEFAULT_SOUNDBOARD_CACHE_DAYS = 7
 DEFAULT_R2_PREFIX = "soundboard"
+DEFAULT_PLAYLIST_DB_PATH = "data/playlists/playlists.db"
 MIN_SOUNDBOARD_SECONDS = 1
 MAX_SOUNDBOARD_SECONDS = 30
 MIN_SOUNDBOARD_SOUNDS = 1
@@ -87,6 +88,10 @@ class Settings:
     soundboard_max_sounds: int = DEFAULT_SOUNDBOARD_MAX_SOUNDS
     soundboard_max_bytes: int = DEFAULT_SOUNDBOARD_MAX_BYTES
     soundboard_cache_days: int = DEFAULT_SOUNDBOARD_CACHE_DAYS
+    playlist_db_path: str = DEFAULT_PLAYLIST_DB_PATH
+    playlist_max_per_user: int = 20
+    playlist_max_tracks: int = 100
+    playlist_backup_minutes: int = 0
     r2_account_id: str = ""
     r2_endpoint: str = ""
     r2_access_key_id: str = ""
@@ -198,6 +203,13 @@ class Settings:
             r2_secret_access_key=r2_secret_access_key,
             r2_bucket=r2_bucket,
             r2_prefix=r2_prefix,
+            playlist_db_path=(
+                environment.get("PLAYLIST_DB_PATH", DEFAULT_PLAYLIST_DB_PATH).strip()
+                or DEFAULT_PLAYLIST_DB_PATH
+            ),
+            playlist_max_per_user=_read_int(environment, "PLAYLIST_MAX_PER_USER", 20),
+            playlist_max_tracks=_read_int(environment, "PLAYLIST_MAX_TRACKS", 100),
+            playlist_backup_minutes=_read_int(environment, "PLAYLIST_BACKUP_MINUTES", 0),
         )
         settings._validate()
         return settings
@@ -255,3 +267,22 @@ class Settings:
             )
         if self.r2_bucket and not self.r2_endpoint:
             raise ConfigurationError("R2_ENDPOINT cannot be empty when R2 is enabled")
+        try:
+            path = Path(self.playlist_db_path)
+            if (
+                not self.playlist_db_path.strip()
+                or "\x00" in self.playlist_db_path
+                or path.name in {"", ":memory:"}
+                or path.is_dir()
+            ):
+                raise ValueError("expected a database file path")
+        except (TypeError, ValueError, OSError) as exc:
+            raise ConfigurationError("PLAYLIST_DB_PATH must be a file path") from exc
+        if not 1 <= self.playlist_max_per_user <= 100:
+            raise ConfigurationError("PLAYLIST_MAX_PER_USER must be between 1 and 100")
+        if not 1 <= self.playlist_max_tracks <= 1000:
+            raise ConfigurationError("PLAYLIST_MAX_TRACKS must be between 1 and 1000")
+        if not 0 <= self.playlist_backup_minutes <= 10080:
+            raise ConfigurationError("PLAYLIST_BACKUP_MINUTES must be between 0 and 10080")
+        if self.playlist_backup_minutes and not self.r2_configured:
+            raise ConfigurationError("PLAYLIST_BACKUP_MINUTES requires R2 configuration")

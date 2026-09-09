@@ -46,6 +46,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
 | `!tfd music` | Join your VC and open its shared interactive music panel |
 | `!tfd soundboard` | Join your VC, open the music panel, and open the custom soundboard |
+| `!tfd playlist` | Open your saved personal playlists; `!tfd help playlist` lists editing commands |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
@@ -132,6 +133,70 @@ All voice and playback commands use the same room rule as the panel. If the bot 
 already connected to another voice channel, it stays there and tells the caller to join
 that channel instead.
 
+### Saved personal playlists
+
+Click **My Playlist** on the music panel, or run `!tfd playlist` and click
+**Danh sách của tôi** to open a private picker. Each member has their own library
+in each Discord server. Only that member can browse, edit, delete, or load it.
+The picker supports creating and renaming playlists, adding songs from URLs or
+five numbered search results, removing songs, and moving a song by its position.
+Playlist and track lists are paginated. Editing a song from an outdated form is
+rejected and the picker refreshes so a changed position cannot affect another song.
+
+**Lưu hàng đợi** creates a new playlist containing the current song followed by
+all waiting songs, in order. **Phát** appends the selected playlist to the shared
+queue without interrupting playback. Unavailable tracks are skipped when their
+turn arrives. Playlist edits never change music already queued.
+
+Text commands work without joining voice for library management. Playing or
+saving the current queue requires the same voice-room access as other music
+controls. A picker opened from a panel stays bound to that panel and room.
+
+| Command | Action |
+| --- | --- |
+| `!tfd playlist list` | Open your library through a private picker |
+| `!tfd playlist create "Nhạc tối"` | Create an empty playlist |
+| `!tfd playlist add "Nhạc tối" <URL or query>` | Append a track or import an external playlist; a query uses the first search result |
+| `!tfd playlist show "Nhạc tối"` | Open that playlist in the picker |
+| `!tfd playlist save "Buổi tối"` | Save the current song and queue as a new playlist |
+| `!tfd playlist play "Nhạc tối"` | Append the saved songs to the queue |
+| `!tfd playlist rename "Nhạc tối" "Nhạc mới"` | Rename a playlist |
+| `!tfd playlist remove "Nhạc mới" 2` | Remove song 2 |
+| `!tfd playlist move "Nhạc mới" 3 1` | Move song 3 to position 1 |
+| `!tfd playlist delete "Nhạc mới"` | Delete a playlist; the picker also offers a confirmation dialog |
+
+Quote names containing spaces. Names are unique per member and server after
+Unicode normalization and case folding. Creating or saving with an existing name
+returns an error. The default limits are 20 playlists per member per server
+(`PLAYLIST_MAX_PER_USER`, range 1–100) and 100 songs per playlist
+(`PLAYLIST_MAX_TRACKS`, range 1–1000). External playlist imports inspect at most
+25 entries per request, matching normal playback. An add or save exceeding the
+song limit is rejected as a whole; existing songs remain intact.
+
+Playlists persist in SQLite at `PLAYLIST_DB_PATH` (local default:
+`data/playlists/playlists.db`). Both Compose files mount the dedicated
+`playlist-data` volume at `/data/playlists` and set the database path to
+`/data/playlists/playlists.db`. The image creates this directory for the unprivileged
+`bot` user (UID/GID 10001). The database contains ownership, names, ordered canonical
+track URLs, titles, and durations. Stream URLs are resolved afresh for playback.
+Database operations run in worker threads with transactions, including concurrent
+quota checks, and survive container replacement when the same volume is reused.
+
+Optional R2 backups are enabled with `PLAYLIST_BACKUP_MINUTES` (0 disables, the
+default; 1–10080 sets the interval). This requires the complete existing R2
+configuration. Every interval, the bot uses SQLite's backup API to create a
+consistent snapshot and uploads it to `<R2_PREFIX>/playlists/latest.sqlite3` in
+`R2_BUCKET`, replacing the previous snapshot. Temporary snapshots stay on the
+playlist volume and are removed after upload or failure. Backup failures are
+logged and retried on the next interval; playback and playlist editing continue.
+An uninitialized library does not overwrite an existing remote backup.
+
+To restore on another host, stop the bot, download that R2 object, place it at
+`PLAYLIST_DB_PATH` on the playlist volume with ownership `10001:10001`, and start
+the bot using that volume. The database is the live source of playlist data;
+restoring a snapshot is an explicit operator action. Retain the volume during
+normal rebuilds; `docker compose down -v` deletes named volumes and their data.
+
 ### Voice-chat session (join + monitor)
 
 1. Join a voice channel yourself.
@@ -170,6 +235,8 @@ src/
   cogs/music.py   # user-facing commands (Vietnamese replies)
   soundboard.py    # per-guild clip store, MyInstants/YouTube ingest
   soundboard_ui.py # soundboard picker, add modal, delete confirm
+  playlists.py    # per-user SQLite playlists and optional R2 snapshots
+  playlist_ui.py  # private playlist picker, editing, and search results
   help_ui.py      # interactive Vietnamese help menu
 tests/            # fast unit and construction tests
 ```

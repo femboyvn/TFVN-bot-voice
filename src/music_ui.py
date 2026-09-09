@@ -21,6 +21,7 @@ from .help_ui import HelpMenuView, normalize_help_prefix
 from .media import SearchResult, format_duration, parse_jump_timestamp
 from .player import GuildAudioSettings, PlaybackState, PlayerSnapshot
 from .soundboard import SoundboardEntry
+from .playlists import SavedPlaylist
 from .tts import normalize_tts_language
 
 log = logging.getLogger(__name__)
@@ -161,6 +162,21 @@ class MusicUIActions(Protocol):
     """
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None: ...
+
+    async def ui_list_playlists(
+        self, guild_id: int, owner_id: int,
+    ) -> tuple[SavedPlaylist, ...]: ...
+
+    async def ui_playlist_action(
+        self, interaction: discord.Interaction, guild_id: int, action: str,
+        args: list[str], voice_channel_id: int | None = None,
+        *, expected_revision: int | None = None,
+    ) -> str: ...
+
+    async def ui_playlist_search(
+        self, interaction: discord.Interaction, guild_id: int, ref: str,
+        query: str, voice_channel_id: int | None = None,
+    ) -> tuple[SearchResult, ...]: ...
 
     def ui_tts_available(self) -> bool: ...
 
@@ -1154,6 +1170,19 @@ class MusicPanelView(discord.ui.View):
             embed=view.render_embed(),
         )
         view.message = message
+
+    @discord.ui.button(label="My Playlist", emoji="🎵", row=3)
+    async def open_playlists(
+        self, interaction: discord.Interaction, button: discord.ui.Button,
+    ) -> None:
+        if not await self.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.defer(ephemeral=True)
+        from .playlist_ui import open_playlist_picker
+
+        await open_playlist_picker(
+            self.actions, interaction, self.guild_id, panel_view=self,
+        )
 
 
 @dataclass(slots=True)

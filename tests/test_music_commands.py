@@ -42,6 +42,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
             self.players,
             self.sessions,
             self.soundboard,
+            Mock(),
         )
         self.ctx = AsyncMock()
         self.ctx.guild.id = 1

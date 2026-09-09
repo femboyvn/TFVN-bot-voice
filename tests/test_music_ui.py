@@ -72,6 +72,7 @@ class _Actions:
             )
         )
         self.ui_list_soundboard = AsyncMock(return_value=())
+        self.ui_list_playlists = AsyncMock(return_value=())
         self.ui_play_soundboard = AsyncMock(return_value="Đã phát.")
         self.ui_add_soundboard = AsyncMock(return_value="Đã lưu.")
         self.ui_remove_soundboard = AsyncMock(return_value="Đã xóa.")
@@ -238,11 +239,33 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             row: sum(child.row == row for child in view.children)
             for row in range(4)
         }
-        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 2})
-        self.assertEqual(len(view.children), 14)
+        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 3})
+        self.assertEqual(len(view.children), 15)
         self.assertEqual(view.open_soundboard.label, "Bảng âm thanh")
         self.assertEqual(view.show_help.label, "Trợ giúp")
         self.assertFalse(view.show_help.disabled)
+        self.assertEqual(view.open_playlists.label, "My Playlist")
+        self.assertFalse(view.open_playlists.disabled)
+
+    async def test_playlist_button_opens_requester_library(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        interaction = _interaction()
+        interaction.followup.send = AsyncMock(return_value=MagicMock())
+        await view.open_playlists.callback(interaction)
+        actions.ui_list_playlists.assert_awaited_once_with(1, interaction.user.id)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["view"].requester_id, interaction.user.id)
+        self.assertIs(kwargs["view"].panel_view, view)
+
+    async def test_playlist_button_denies_outsider_before_reading_library(self) -> None:
+        actions = _Actions(_snapshot())
+        actions.ui_ensure_panel_access.return_value = False
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        await view.open_playlists.callback(_interaction())
+        actions.ui_list_playlists.assert_not_awaited()
 
     async def test_soundboard_button_opens_ephemeral_picker(self) -> None:
         actions = _Actions(_snapshot())

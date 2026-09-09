@@ -14,11 +14,14 @@ services:
       - /tmp:size=256m,mode=1777
     volumes:
       - soundboard-data:/data/soundboard
+      - playlist-data:/data/playlists
     environment:
       SOUNDBOARD_DATA_DIR: /data/soundboard
+      PLAYLIST_DB_PATH: /data/playlists/playlists.db
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 20s
 
 volumes:
   soundboard-data:
+  playlist-data:
