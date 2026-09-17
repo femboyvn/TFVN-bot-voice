@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 
 from src.media import QueuedTrack, SearchResult
-from src.playlists import PlaylistError, SavedPlaylist
+from src.playlists import SERVER_OWNER_ID, PlaylistError, SavedPlaylist
 from src.playlist_ui import (
     DeletePlaylistConfirmation, PlaylistLauncher, PlaylistModal,
     PlaylistSearchView, PlaylistSelect, PlaylistView,
@@ -106,6 +106,7 @@ class PlaylistUiTests(unittest.IsolatedAsyncioTestCase):
         self.actions.ui_playlist_action.assert_awaited_once_with(
             value, 1, "move", [entries[0].id, "2", "1"], None,
             expected_revision=entries[0].revision,
+            owner_id=10,
         )
 
     async def test_search_modal_offers_choices_and_selected_url_is_saved_once(self) -> None:
@@ -125,6 +126,7 @@ class PlaylistUiTests(unittest.IsolatedAsyncioTestCase):
         await choices.children[2].callback(interaction())
         self.actions.ui_playlist_action.assert_awaited_once_with(
             selected, 1, "add", [playlist().id, results[2].url], None,
+            expected_revision=None, owner_id=10,
         )
         self.assertTrue(all(button.disabled for button in choices.children))
 
@@ -146,6 +148,7 @@ class PlaylistUiTests(unittest.IsolatedAsyncioTestCase):
         self.actions.ui_playlist_search.assert_not_awaited()
         self.actions.ui_playlist_action.assert_awaited_once_with(
             value, 1, "add", [playlist().id, "https://youtu.be/track"], None,
+            expected_revision=None, owner_id=10,
         )
 
     async def test_delete_confirmation_requires_owner_and_is_used_once(self) -> None:
@@ -158,6 +161,7 @@ class PlaylistUiTests(unittest.IsolatedAsyncioTestCase):
         await view.confirm.callback(interaction())
         self.actions.ui_playlist_action.assert_awaited_once_with(
             value, 1, "delete", [playlist().id], None,
+            expected_revision=None, owner_id=10,
         )
 
     async def test_cancel_delete_and_timeout_leave_store_untouched(self) -> None:
@@ -185,3 +189,25 @@ class PlaylistUiTests(unittest.IsolatedAsyncioTestCase):
                 await view.run_action(interaction(), action, [new.name])
                 self.assertEqual(view.selected_id, new.id)
                 self.assertIn(new.name, view.render_embed().description)
+
+    async def test_server_launcher_opens_shared_library(self) -> None:
+        launcher = PlaylistLauncher(self.actions, 1, 10, server=True)
+        self.assertEqual(launcher.open_library.label, "Danh sách máy chủ")
+        value = interaction()
+        await launcher.open_library.callback(value)
+        self.actions.ui_list_playlists.assert_awaited_once_with(1, SERVER_OWNER_ID)
+        self.assertTrue(value.followup.send.await_args.kwargs["view"].is_server_library)
+
+    async def test_toggle_scope_reloads_server_then_personal_library(self) -> None:
+        view = PlaylistView(self.actions, 1, 10, (playlist(),))
+        self.assertFalse(view.is_server_library)
+        self.assertEqual(view.toggle_scope.label, "Máy chủ")
+        self.actions.ui_list_playlists.return_value = ()
+        await view.toggle_scope.callback(interaction())
+        self.actions.ui_list_playlists.assert_awaited_with(1, SERVER_OWNER_ID)
+        self.assertTrue(view.is_server_library)
+        self.assertEqual(view.toggle_scope.label, "Của tôi")
+        self.assertEqual(view.render_embed().title, "Danh sách phát của máy chủ")
+        await view.toggle_scope.callback(interaction())
+        self.actions.ui_list_playlists.assert_awaited_with(1, 10)
+        self.assertFalse(view.is_server_library)

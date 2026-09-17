@@ -12,7 +12,12 @@ import discord
 
 from .media import MediaExtractionError, SearchResult, format_duration
 from .music_ui import _RequesterView, _disable, _send_ephemeral
-from .playlists import MAX_PLAYLIST_NAME, PlaylistError, SavedPlaylist
+from .playlists import (
+    MAX_PLAYLIST_NAME,
+    SERVER_OWNER_ID,
+    PlaylistError,
+    SavedPlaylist,
+)
 from .spotify import is_spotify_input
 
 log = logging.getLogger(__name__)
@@ -30,11 +35,13 @@ class PlaylistActions(Protocol):
         self, interaction: discord.Interaction, guild_id: int, action: str,
         args: list[str], voice_channel_id: int | None = None,
         *, expected_revision: int | None = None,
+        owner_id: int | None = None,
     ) -> str: ...
 
     async def ui_playlist_search(
         self, interaction: discord.Interaction, guild_id: int, ref: str,
         query: str, voice_channel_id: int | None = None,
+        *, owner_id: int | None = None,
     ) -> tuple[SearchResult, ...]: ...
 
 
@@ -43,12 +50,16 @@ class PlaylistLauncher(_RequesterView):
 
     def __init__(
         self, actions: PlaylistActions, guild_id: int, requester_id: int,
-        *, ref: str = "",
+        *, ref: str = "", server: bool = False,
     ) -> None:
         super().__init__(requester_id, timeout=VIEW_TIMEOUT)
         self.actions = actions
         self.guild_id = guild_id
         self.ref = ref
+        self.server = server
+        self.open_library.label = (
+            "Danh sách máy chủ" if server else "Danh sách của tôi"
+        )
 
     @discord.ui.button(label="Danh sách của tôi", style=discord.ButtonStyle.primary)
     async def open_library(
@@ -62,18 +73,22 @@ class PlaylistLauncher(_RequesterView):
         await interaction.response.defer(ephemeral=True)
         await open_playlist_picker(
             self.actions, interaction, self.guild_id, ref=self.ref,
+            owner_id=SERVER_OWNER_ID if self.server else interaction.user.id,
         )
 
 
 async def open_playlist_picker(
     actions: PlaylistActions, interaction: discord.Interaction, guild_id: int,
     *, panel_view: object | None = None, ref: str = "",
+    owner_id: int | None = None,
 ) -> None:
     """The caller defers before reading storage."""
+    library_owner = interaction.user.id if owner_id is None else owner_id
     try:
-        entries = await actions.ui_list_playlists(guild_id, interaction.user.id)
+        entries = await actions.ui_list_playlists(guild_id, library_owner)
         view = PlaylistView(
             actions, guild_id, interaction.user.id, entries, panel_view=panel_view,
+            library_owner_id=library_owner,
         )
         if ref:
             ref = unicodedata.normalize("NFC", ref).strip()
@@ -124,18 +139,26 @@ class PlaylistView(_RequesterView):
     def __init__(
         self, actions: PlaylistActions, guild_id: int, requester_id: int,
         entries: tuple[SavedPlaylist, ...] = (), *, panel_view: object | None = None,
+        library_owner_id: int | None = None,
     ) -> None:
         super().__init__(requester_id, timeout=VIEW_TIMEOUT)
         self.actions = actions
         self.guild_id = guild_id
         self.entries = entries
         self.panel_view = panel_view
+        self.library_owner_id = (
+            requester_id if library_owner_id is None else library_owner_id
+        )
         self.voice_channel_id: int | None = getattr(panel_view, "voice_channel_id", None)
         self.page = 0
         self.track_page = 0
         self.selected_id: str | None = entries[0].id if entries else None
         self._action_lock = asyncio.Lock()
         self.rebuild()
+
+    @property
+    def is_server_library(self) -> bool:
+        return self.library_owner_id == SERVER_OWNER_ID
 
     @property
     def selected(self) -> SavedPlaylist | None:
@@ -177,10 +200,12 @@ class PlaylistView(_RequesterView):
             self.add_item(PlaylistSelect(window, self.selected_id))
         for button in (
             self.previous_list, self.next_list, self.create, self.save_queue,
+            self.toggle_scope,
             self.add_track, self.rename, self.delete, self.play,
             self.previous_tracks, self.next_tracks, self.remove_track, self.move_track,
         ):
             self.add_item(button)
+        self.toggle_scope.label = "Của tôi" if self.is_server_library else "Máy chủ"
         self.previous_list.disabled = self.page == 0
         self.next_list.disabled = self.page == self.page_count - 1
         self.previous_tracks.disabled = self.track_page == 0
@@ -192,7 +217,11 @@ class PlaylistView(_RequesterView):
 
     def render_embed(self) -> discord.Embed:
         selected = self.selected
-        embed = discord.Embed(title="Danh sách phát của bạn", color=discord.Color.blurple())
+        title = (
+            "Danh sách phát của máy chủ" if self.is_server_library
+            else "Danh sách phát của bạn"
+        )
+        embed = discord.Embed(title=title, color=discord.Color.blurple())
         if selected is None:
             embed.description = "Chưa có danh sách. Bấm **Tạo** hoặc **Lưu hàng đợi**."
         else:
@@ -219,7 +248,9 @@ class PlaylistView(_RequesterView):
         self, interaction: discord.Interaction, *, select_name: str | None = None,
     ) -> None:
         try:
-            self.entries = await self.actions.ui_list_playlists(self.guild_id, self.requester_id)
+            self.entries = await self.actions.ui_list_playlists(
+                self.guild_id, self.library_owner_id,
+            )
             if select_name is not None:
                 name_key = unicodedata.normalize("NFC", select_name).strip().casefold()
                 for index, entry in enumerate(self.entries):
@@ -246,15 +277,11 @@ class PlaylistView(_RequesterView):
         async with self._action_lock:
             if not await self.ensure_access(interaction):
                 return
-            if expected_revision is None:
-                message = await self.actions.ui_playlist_action(
-                    interaction, self.guild_id, action, args, self.voice_channel_id,
-                )
-            else:
-                message = await self.actions.ui_playlist_action(
-                    interaction, self.guild_id, action, args, self.voice_channel_id,
-                    expected_revision=expected_revision,
-                )
+            message = await self.actions.ui_playlist_action(
+                interaction, self.guild_id, action, args, self.voice_channel_id,
+                expected_revision=expected_revision,
+                owner_id=self.library_owner_id,
+            )
             await self.reload_and_edit(
                 interaction,
                 select_name=args[0] if action in {"create", "save"} else None,
@@ -303,6 +330,21 @@ class PlaylistView(_RequesterView):
         self, interaction: discord.Interaction, button: discord.ui.Button,
     ) -> None:
         await self.open_modal(interaction, "save")
+
+    @discord.ui.button(label="Máy chủ", row=1)
+    async def toggle_scope(
+        self, interaction: discord.Interaction, button: discord.ui.Button,
+    ) -> None:
+        if not await self.ensure_access(interaction):
+            return
+        await interaction.response.defer()
+        self.library_owner_id = (
+            self.requester_id if self.is_server_library else SERVER_OWNER_ID
+        )
+        self.selected_id = None
+        self.page = 0
+        self.track_page = 0
+        await self.reload_and_edit(interaction)
 
     @discord.ui.button(label="Thêm bài", style=discord.ButtonStyle.success, row=2)
     async def add_track(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -387,6 +429,7 @@ class PlaylistModal(discord.ui.Modal):
                 results = await self.picker.actions.ui_playlist_search(
                     interaction, self.picker.guild_id, self.ref or "", value,
                     self.picker.voice_channel_id,
+                    owner_id=self.picker.library_owner_id,
                 )
             except (PlaylistError, MediaExtractionError) as exc:
                 await _send_ephemeral(interaction, str(exc))

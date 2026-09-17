@@ -8,7 +8,10 @@ from src.config import Settings
 from src.voice import (
     VoiceAccessError,
     connect_member_voice_client,
+    connect_voice_channel,
+    live_voice_channel_id,
     same_voice_channel_error,
+    voice_client_is_live,
 )
 
 
@@ -57,6 +60,17 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
                 self.settings,
             )
 
+        voice_client.move_to.assert_not_called()
+
+    async def test_connect_voice_channel_reuses_same_room(self) -> None:
+        voice_client = Mock()
+        voice_client.channel = self.channel
+        voice_client.is_connected.return_value = True
+        self.guild.voice_client = voice_client
+
+        result = await connect_voice_channel(self.guild, self.channel, self.settings)
+
+        self.assertIs(result, voice_client)
         voice_client.move_to.assert_not_called()
 
     async def test_connects_when_bot_is_disconnected(self) -> None:
@@ -143,6 +157,51 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(error)
+
+    def test_deleted_channel_client_is_not_live(self) -> None:
+        stale = Mock()
+        stale.id = 10
+        voice_client = Mock()
+        voice_client.channel = stale
+        voice_client.is_connected.return_value = True
+        self.guild.voice_client = voice_client
+        self.guild.get_channel = Mock(return_value=None)
+
+        self.assertFalse(voice_client_is_live(self.guild, voice_client))
+        self.assertIsNone(live_voice_channel_id(self.guild))
+
+        other = Mock()
+        other.id = 20
+        member = _member_in(other)
+        error = same_voice_channel_error(self.guild, member)
+        self.assertIsNotNone(error)
+        self.assertIn("chưa kết nối", error.lower())
+
+    async def test_connects_when_stale_client_points_at_deleted_channel(self) -> None:
+        stale = Mock()
+        stale.id = 10
+        voice_client = Mock()
+        voice_client.channel = stale
+        voice_client.is_connected.return_value = True
+        voice_client.disconnect = AsyncMock()
+        self.guild.voice_client = voice_client
+        self.guild.get_channel = Mock(return_value=None)
+
+        new_channel = Mock()
+        new_channel.id = 20
+        connected = Mock()
+        new_channel.connect = AsyncMock(return_value=connected)
+        member = _member_in(new_channel)
+
+        result = await connect_member_voice_client(
+            self.guild,
+            member,
+            self.settings,
+        )
+
+        self.assertIs(result, connected)
+        voice_client.disconnect.assert_awaited_once_with(force=True)
+        new_channel.connect.assert_awaited_once()
 
 
 if __name__ == "__main__":

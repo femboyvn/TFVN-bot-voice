@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import logging
 import math
+import random
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -60,6 +62,17 @@ class ControlResult(Enum):
     NOT_PAUSED = auto()
 
 
+class LoopMode(Enum):
+    """User-visible looping for the current track or the whole queue."""
+
+    OFF = auto()
+    TRACK = auto()
+    QUEUE = auto()
+
+
+HISTORY_LIMIT = 20
+
+
 @dataclass(frozen=True, slots=True)
 class PlayerSnapshot:
     """Immutable playback data safe for commands and interaction views."""
@@ -68,6 +81,8 @@ class PlayerSnapshot:
     queued: tuple[QueuedTrack, ...]
     state: PlaybackState
     loop_current: bool
+    loop_queue: bool = False
+    can_previous: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +144,13 @@ class GuildPlayer:
         self.duck_level = duck_level
         self.current: QueuedTrack | None = None
         self.loop_current = False
-        self._queue: asyncio.Queue[_QueuedEntry] = asyncio.Queue()
+        self.loop_queue = False
+        self._waiting: deque[_QueuedEntry] = deque()
+        self._queue_ready = asyncio.Event()
+        self._history: deque[_QueuedEntry] = deque()
+        self._omit_history = False
+        self._vote_key: str | None = None
+        self._vote_skippers: set[int] = set()
         self._announce_channel: discord.abc.Messageable | None = None
         self._closed = False
         self._mixer: DuckingAudioSource | None = None
@@ -197,12 +218,12 @@ class GuildPlayer:
             self._make_queue_entry(track, announce_channel) for track in tracks
         )
         if not entries:
-            return self._queue.qsize()
+            return len(self._waiting)
 
         for entry in entries:
-            self._queue.put_nowait(entry)
+            self._put_waiting(entry)
         self._activity_version += 1
-        queue_size = self._queue.qsize()
+        queue_size = len(self._waiting)
         await self._notify_state_change()
         return queue_size
 
@@ -234,6 +255,7 @@ class GuildPlayer:
         # idle deadline instead of appearing to disconnect immediately.
         self._activity_version += 1
         self.loop_current = False
+        self.loop_queue = False
         skip_requested = self.skip() if had_current else False
         if not skip_requested:
             await self._notify_state_change()
@@ -264,12 +286,14 @@ class GuildPlayer:
 
     def snapshot(self) -> PlayerSnapshot:
         """Return a stable, public view without exposing the asyncio queue."""
-        queued = tuple(entry.metadata for entry in tuple(self._queue._queue))
+        queued = tuple(entry.metadata for entry in self._waiting)
         return PlayerSnapshot(
             current=self.current,
             queued=queued,
             state=self._state,
             loop_current=self.loop_current,
+            loop_queue=self.loop_queue,
+            can_previous=bool(self._history),
         )
 
     def pause(self) -> ControlResult:
@@ -318,16 +342,27 @@ class GuildPlayer:
         self._schedule_state_change()
         return ControlResult.SUCCESS
 
-    def toggle_loop(self) -> bool:
-        self.loop_current = not self.loop_current
+    def toggle_loop(self) -> LoopMode:
+        """Cycle off → current track → whole queue → off."""
+        if self.loop_current:
+            self.loop_current = False
+            self.loop_queue = True
+            mode = LoopMode.QUEUE
+        elif self.loop_queue:
+            self.loop_queue = False
+            mode = LoopMode.OFF
+        else:
+            self.loop_current = True
+            mode = LoopMode.TRACK
         self._schedule_state_change()
-        return self.loop_current
+        return mode
 
-    def skip(self) -> bool:
+    def skip(self, *, keep_loop: bool = False) -> bool:
+        if not keep_loop:
+            self.loop_current = False
         if self._pending_jump is not None:
             self._pending_jump = None
             self._skip_requested = True
-            self.loop_current = False
             self._schedule_state_change()
             return True
 
@@ -337,7 +372,6 @@ class GuildPlayer:
             and not self._skip_requested
         ):
             self._skip_requested = True
-            self.loop_current = False
             resolve_task = self._resolve_task
             if resolve_task is not None and not resolve_task.done():
                 resolve_task.cancel()
@@ -354,10 +388,78 @@ class GuildPlayer:
             return False
 
         self._skip_requested = True
-        self.loop_current = False
         voice_client.stop()
         self._schedule_state_change()
         return True
+
+    def previous(self) -> bool:
+        """Play the last finished track; put the current song back in front."""
+        if self._closed or not self._history:
+            return False
+        previous = self._history.pop()
+        if self._current_entry is not None:
+            self._put_waiting(self._current_entry, front=True)
+        self._put_waiting(previous, front=True)
+        self._omit_history = True
+        if self.current is not None:
+            return self.skip(keep_loop=True)
+        self._activity_version += 1
+        self._schedule_state_change()
+        return True
+
+    def shuffle_queue(self) -> int:
+        """Shuffle waiting tracks only. Returns the waiting count."""
+        items = list(self._waiting)
+        random.shuffle(items)
+        self._waiting.clear()
+        self._waiting.extend(items)
+        self._activity_version += 1
+        self._schedule_state_change()
+        return len(items)
+
+    def remove_queued(self, position: int) -> QueuedTrack | None:
+        """Remove a 1-based waiting track. Does not touch the current song."""
+        if not 1 <= position <= len(self._waiting):
+            return None
+        entry = self._waiting[position - 1]
+        del self._waiting[position - 1]
+        self._activity_version += 1
+        self._schedule_state_change()
+        return entry.metadata
+
+    def move_queued(self, position: int, destination: int) -> bool:
+        """Move a 1-based waiting track to another 1-based waiting slot."""
+        count = len(self._waiting)
+        if not 1 <= position <= count or not 1 <= destination <= count:
+            return False
+        if position == destination:
+            return True
+        entry = self._waiting[position - 1]
+        del self._waiting[position - 1]
+        self._waiting.insert(destination - 1, entry)
+        self._activity_version += 1
+        self._schedule_state_change()
+        return True
+
+    def vote_skip(self, user_id: int, *, voter_count: int) -> tuple[str, int, int]:
+        """Record a skip vote. Majority of *voter_count* (at least 1) skips."""
+        if self.current is None:
+            return ("idle", 0, 0)
+        key = self.current.webpage_url
+        if self._vote_key != key:
+            self._vote_key = key
+            self._vote_skippers = set()
+        needed = max(1, math.ceil(max(1, voter_count) / 2))
+        if user_id in self._vote_skippers:
+            return ("already", len(self._vote_skippers), needed)
+        self._vote_skippers.add(user_id)
+        votes = len(self._vote_skippers)
+        if votes >= needed:
+            skipped = self.skip()
+            self._vote_skippers.clear()
+            self._vote_key = None
+            return ("skipped" if skipped else "idle", votes, needed)
+        return ("voted", votes, needed)
 
     def jump(self, offset: int) -> JumpResult:
         """Request a restart of the current track at ``offset`` seconds."""
@@ -438,10 +540,7 @@ class GuildPlayer:
             if self._current_entry is None:
                 wait_version = self._activity_version
                 try:
-                    entry = await asyncio.wait_for(
-                        self._queue.get(),
-                        timeout=self.idle_timeout,
-                    )
+                    entry = await self._get_waiting(self.idle_timeout)
                 except TimeoutError:
                     # Opening/reusing a controller touches an idle player. If
                     # that happened during this wait, grant a fresh full idle
@@ -449,7 +548,7 @@ class GuildPlayer:
                     if (
                         self._activity_version != wait_version
                         or self._activity_reservations
-                        or not self._queue.empty()
+                        or self._waiting
                     ):
                         continue
                     idle_version = self._activity_version
@@ -458,7 +557,7 @@ class GuildPlayer:
                     if (
                         self._activity_version != idle_version
                         or self._activity_reservations
-                        or not self._queue.empty()
+                        or self._waiting
                     ):
                         continue
                     await self.on_idle(self.guild.id, self)
@@ -598,12 +697,14 @@ class GuildPlayer:
                 continue
 
             jump_request = None
-            if not self.loop_current:
-                self._finish_current()
-            else:
+            if self.loop_current:
                 # A loop replay re-resolves the canonical URL on the next pass.
                 self._resolved_track = None
                 self._state = PlaybackState.LOADING
+            else:
+                if self.loop_queue and self._current_entry is not None:
+                    self._put_waiting(self._current_entry)
+                self._finish_current()
             await self._notify_state_change()
 
     async def _announce_now_playing(self, track: QueuedTrack | Track) -> None:
@@ -841,11 +942,18 @@ class GuildPlayer:
         return track
 
     def _finish_current(self) -> None:
+        if not self._omit_history and self._current_entry is not None:
+            self._history.append(self._current_entry)
+            while len(self._history) > HISTORY_LIMIT:
+                self._history.popleft()
+        self._omit_history = False
         self.current = None
         self._current_entry = None
         self._resolved_track = None
         self.loop_current = False
         self._pending_jump = None
+        self._vote_key = None
+        self._vote_skippers.clear()
         # Skip belongs to the current generation. Never carry a late click
         # from an error-reporting await into the following queue item.
         self._skip_requested = False
@@ -904,14 +1012,35 @@ class GuildPlayer:
         except Exception:
             log.exception("Playback state listener failed in guild %s", self.guild.id)
 
-    def _drain_queue(self) -> int:
-        removed = 0
-        while True:
+    def _put_waiting(self, entry: _QueuedEntry, *, front: bool = False) -> None:
+        if front:
+            self._waiting.appendleft(entry)
+        else:
+            self._waiting.append(entry)
+        self._queue_ready.set()
+
+    async def _get_waiting(self, timeout: float) -> _QueuedEntry:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not self._waiting:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            self._queue_ready.clear()
+            if self._waiting:
+                break
             try:
-                self._queue.get_nowait()
-                removed += 1
-            except asyncio.QueueEmpty:
-                return removed
+                await asyncio.wait_for(self._queue_ready.wait(), timeout=remaining)
+            except TimeoutError:
+                if self._waiting:
+                    break
+                raise
+        return self._waiting.popleft()
+
+    def _drain_queue(self) -> int:
+        removed = len(self._waiting)
+        self._waiting.clear()
+        return removed
 
 
 class PlayerManager:

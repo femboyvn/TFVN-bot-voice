@@ -233,13 +233,16 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(defaults.playlist_backup_minutes, 0)
         self.assertEqual(defaults.playlist_max_per_user, 20)
         self.assertEqual(defaults.playlist_max_tracks, 100)
+        self.assertEqual(defaults.playlist_max_server, 20)
         settings = Settings.from_env({
             "DISCORD_TOKEN": "secret", "PLAYLIST_DB_PATH": " /data/playlists/playlists.db ",
             "PLAYLIST_MAX_PER_USER": "50", "PLAYLIST_MAX_TRACKS": "250",
+            "PLAYLIST_MAX_SERVER": "8",
         })
         self.assertEqual(settings.playlist_db_path, "/data/playlists/playlists.db")
         self.assertEqual(settings.playlist_max_per_user, 50)
         self.assertEqual(settings.playlist_max_tracks, 250)
+        self.assertEqual(settings.playlist_max_server, 8)
         blank = Settings.from_env({"DISCORD_TOKEN": "secret", "PLAYLIST_DB_PATH": " "})
         self.assertEqual(blank.playlist_db_path, defaults.playlist_db_path)
 
@@ -249,6 +252,7 @@ class SettingsTests(unittest.TestCase):
             ("PLAYLIST_DB_PATH", "bad\x00path"),
             ("PLAYLIST_MAX_PER_USER", "0"), ("PLAYLIST_MAX_PER_USER", "101"),
             ("PLAYLIST_MAX_TRACKS", "0"), ("PLAYLIST_MAX_TRACKS", "1001"),
+            ("PLAYLIST_MAX_SERVER", "0"), ("PLAYLIST_MAX_SERVER", "101"),
             ("PLAYLIST_BACKUP_MINUTES", "-1"), ("PLAYLIST_BACKUP_MINUTES", "10081"),
             ("PLAYLIST_MAX_TRACKS", "1.5"),
         ):

@@ -6,6 +6,7 @@ Discord replies are Vietnamese (customer UI). Developer comments stay English.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shlex
 from collections.abc import Callable
@@ -40,12 +41,20 @@ from ..player import (
     ControlResult,
     GuildAudioSettings,
     JumpResult,
+    LoopMode,
     PlayerManager,
     PlayerSnapshot,
 )
-from ..playlists import PlaylistError, PlaylistStore, SavedPlaylist
+from ..playlists import (
+    SERVER_OWNER_ID,
+    PlaybackSession,
+    PlaylistError,
+    PlaylistStore,
+    SavedPlaylist,
+)
 from ..session import SessionManager
 from ..soundboard import (
+    InstantHit,
     SoundboardEntry,
     SoundboardError,
     SoundboardService,
@@ -56,10 +65,14 @@ from ..spotify import is_spotify_input
 from ..voice import (
     VoiceAccessError,
     connect_member_voice_client,
+    connect_voice_channel,
     disconnect_guild_voice_client,
     get_or_connect_voice_client,
+    guild_channel_exists,
+    live_voice_channel_id,
     member_voice_channel,
     same_voice_channel_error,
+    voice_client_is_live,
 )
 
 log = logging.getLogger(__name__)
@@ -88,22 +101,26 @@ class MusicCog(commands.Cog, name="Music"):
             Path(str(settings.playlist_db_path)),
             max_per_user=settings.playlist_max_per_user,
             max_tracks=settings.playlist_max_tracks,
+            max_per_server=settings.playlist_max_server,
         )
         self.music_ui = MusicPanelManager(
             self,
             command_prefix=settings.command_prefix,
         )
         self._operation_locks: dict[int, asyncio.Lock] = {}
+        self._restored = False
+        self._restoring = False
         self.players.add_state_listener(self.music_ui.on_player_state_change)
+        self.players.add_state_listener(self._persist_playback_state)
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.guild_only()
     async def music(self, ctx: commands.Context[Any]) -> None:
         """Join the caller's room and post its shared music control panel."""
         async with self._operation_lock(ctx.guild.id):
             await self._join_and_post_panel(ctx)
 
-    @commands.command()
+    @commands.hybrid_command()
     @commands.guild_only()
     async def soundboard(self, ctx: commands.Context[Any]) -> None:
         """Join the caller's room, post the music panel, and open the soundboard."""
@@ -148,17 +165,21 @@ class MusicCog(commands.Cog, name="Music"):
             f"`{ctx.prefix}leave` để thoát."
         )
 
-    @commands.command(name="playlist")
+    @commands.hybrid_command(name="playlist")
     @commands.guild_only()
     async def playlist(
         self, ctx: commands.Context[Any], *, arguments: str = "",
     ) -> None:
-        """Manage personal playlists; quote names containing spaces."""
+        """Manage personal or server playlists; quote names containing spaces."""
         try:
             args = shlex.split(arguments)
         except ValueError:
             await ctx.send("Dấu ngoặc kép chưa đóng. Hãy kiểm tra tên danh sách.")
             return
+        server = bool(args and args[0].lower() == "server")
+        if server:
+            args = args[1:]
+        owner_id = SERVER_OWNER_ID if server else ctx.author.id
         action = args.pop(0).lower() if args else "list"
         try:
             if action in {"list", "show"}:
@@ -169,16 +190,19 @@ class MusicCog(commands.Cog, name="Music"):
                 view = PlaylistLauncher(
                     self, ctx.guild.id, ctx.author.id,
                     ref=" ".join(args) if action == "show" else "",
+                    server=server,
                 )
                 view.message = await ctx.send(
-                    "Bấm để mở danh sách phát riêng của bạn.", view=view,
+                    "Bấm để mở danh sách chung của máy chủ." if server
+                    else "Bấm để mở danh sách phát riêng của bạn.",
+                    view=view,
                 )
                 return
             if action == "play":
                 if not await self._preflight_voice_connection(ctx):
                     return
                 saved = await self.playlists.get(
-                    ctx.guild.id, ctx.author.id, " ".join(args),
+                    ctx.guild.id, owner_id, " ".join(args),
                 )
                 self._require_playlist_tracks(saved)
                 if not await self._enqueue_prepared(
@@ -191,8 +215,10 @@ class MusicCog(commands.Cog, name="Music"):
                     if not await self._require_voice_control(ctx):
                         return
                     tracks = self._playlist_queue_snapshot(ctx.guild.id)
+                    if server:
+                        self._require_server_playlist_manage(ctx.author)
                     saved = await self.playlists.create(
-                        ctx.guild.id, ctx.author.id, " ".join(args), tracks,
+                        ctx.guild.id, owner_id, " ".join(args), tracks,
                     )
                 message = self._playlist_saved_message(saved)
             else:
@@ -203,12 +229,53 @@ class MusicCog(commands.Cog, name="Music"):
                 elif action in {"add", "rename"} and len(args) >= 2:
                     args = [args[0], " ".join(args[1:])]
                 async with ctx.typing():
+                    if server and action in {"create", "rename", "delete"}:
+                        self._require_server_playlist_manage(ctx.author)
                     message = await self._edit_playlist(
-                        ctx.guild.id, ctx.author.id, action, args,
+                        ctx.guild.id, owner_id, action, args,
                     )
         except (PlaylistError, MediaExtractionError) as exc:
             message = str(exc)
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
+
+    @staticmethod
+    def _require_server_playlist_manage(user: object) -> None:
+        permissions = getattr(user, "guild_permissions", None)
+        if not getattr(permissions, "manage_guild", False):
+            raise PlaylistError(
+                "Chỉ người có quyền Quản lý máy chủ mới sửa danh sách chung."
+            )
+
+    @staticmethod
+    def _loop_message(mode: LoopMode) -> str:
+        if mode is LoopMode.TRACK:
+            return "Đã bật lặp bài hiện tại."
+        if mode is LoopMode.QUEUE:
+            return "Đã bật lặp cả hàng đợi."
+        return "Đã tắt lặp."
+
+    @staticmethod
+    def _human_voice_members(channel: object) -> list:
+        members = getattr(channel, "members", ()) or ()
+        if not isinstance(members, (list, tuple)):
+            return []
+        return [
+            member for member in members if not getattr(member, "bot", False)
+        ]
+
+    def _voice_voter_count(self, guild: discord.Guild, voice_channel_id: int) -> int:
+        channel = guild.get_channel(voice_channel_id)
+        return max(1, len(self._human_voice_members(channel)))
+
+    def _apply_vote_skip(self, player: object, user_id: int, voter_count: int) -> str:
+        status, votes, needed = player.vote_skip(user_id, voter_count=voter_count)
+        if status == "skipped":
+            return "Đã bỏ qua."
+        if status == "already":
+            return f"Bạn đã bỏ phiếu rồi ({votes}/{needed})."
+        if status == "voted":
+            return f"Đã ghi phiếu bỏ qua ({votes}/{needed})."
+        return "Không có gì đang phát."
 
     @staticmethod
     def _playlist_saved_message(saved: SavedPlaylist) -> str:
@@ -289,6 +356,13 @@ class MusicCog(commands.Cog, name="Music"):
                 if session is not None and session.active
                 else None
             )
+            bound_missing = (
+                expected_channel_id is not None
+                and not guild_channel_exists(ctx.guild, expected_channel_id)
+            )
+            if bound_missing:
+                await self._leave_voice(ctx)
+                return
             if not await self._require_voice_control(
                 ctx,
                 expected_channel_id=expected_channel_id,
@@ -401,11 +475,20 @@ class MusicCog(commands.Cog, name="Music"):
             if not await self._require_voice_control(ctx):
                 return
             player = self.players.get(ctx.guild.id)
-            skipped = bool(player and player.skip())
-        if skipped:
-            await ctx.send("Đã bỏ qua.")
-            return
-        await ctx.send("Không có gì đang phát.")
+            if player is None:
+                message = "Không có gì đang phát."
+            else:
+                channel_id = getattr(
+                    getattr(ctx.voice_client, "channel", None), "id", None
+                ) or getattr(
+                    member_voice_channel(ctx.author), "id", 0
+                )
+                message = self._apply_vote_skip(
+                    player,
+                    ctx.author.id,
+                    self._voice_voter_count(ctx.guild, int(channel_id or 0)),
+                )
+        await ctx.send(message)
 
     @commands.command()
     @commands.guild_only()
@@ -437,13 +520,13 @@ class MusicCog(commands.Cog, name="Music"):
                 return
             player = self.players.get(ctx.guild.id)
             if not player or player.current is None:
-                enabled = None
+                mode = None
             else:
-                enabled = player.toggle_loop()
-        if enabled is None:
+                mode = player.toggle_loop()
+        if mode is None:
             await ctx.send("Không có gì đang phát.")
             return
-        await ctx.send(f"Chế độ lặp {'đã bật' if enabled else 'đã tắt'}.")
+        await ctx.send(self._loop_message(mode))
 
     @commands.command()
     @commands.guild_only()
@@ -501,12 +584,194 @@ class MusicCog(commands.Cog, name="Music"):
         await ctx.send("\n".join(lines))
 
     @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if self._restored:
+            return
+        self._restored = True
+        await self._restore_playback_sessions()
+
+    async def _persist_playback_state(
+        self, guild_id: int, snapshot: PlayerSnapshot,
+    ) -> None:
+        if self._restoring:
+            return
+        record = self.music_ui.get(guild_id)
+        if record is None:
+            return
+        text_id = getattr(record.destination, "id", None)
+        if text_id is None:
+            return
+        try:
+            await self.playlists.save_playback(
+                guild_id,
+                record.voice_channel_id,
+                int(text_id),
+                current=snapshot.current,
+                queued=snapshot.queued,
+                loop_current=snapshot.loop_current,
+                loop_queue=snapshot.loop_queue,
+            )
+        except PlaylistError:
+            log.exception("Could not persist playback for guild %s", guild_id)
+
+    async def _persist_session(
+        self,
+        guild_id: int,
+        voice_channel_id: int,
+        text_channel_id: int | None,
+    ) -> None:
+        if text_channel_id is None:
+            return
+        snapshot = self.ui_snapshot(guild_id)
+        try:
+            await self.playlists.save_playback(
+                guild_id,
+                voice_channel_id,
+                text_channel_id,
+                current=snapshot.current if snapshot else None,
+                queued=snapshot.queued if snapshot else (),
+                loop_current=bool(snapshot and snapshot.loop_current),
+                loop_queue=bool(snapshot and snapshot.loop_queue),
+            )
+        except PlaylistError:
+            log.exception("Could not persist session for guild %s", guild_id)
+
+    async def _restore_playback_sessions(self) -> None:
+        try:
+            sessions = await self.playlists.list_playback()
+        except PlaylistError:
+            log.exception("Could not load playback sessions")
+            return
+        self._restoring = True
+        try:
+            for session in sessions:
+                try:
+                    await self._restore_one_session(session)
+                except Exception:
+                    log.exception(
+                        "Could not restore playback for guild %s", session.guild_id,
+                    )
+        finally:
+            self._restoring = False
+
+    async def _restore_one_session(self, session: PlaybackSession) -> None:
+        guild = self.bot.get_guild(session.guild_id)
+        if guild is None:
+            return
+        voice = guild.get_channel(session.voice_channel_id)
+        text = guild.get_channel(session.text_channel_id)
+        if voice is None or text is None or not hasattr(text, "send"):
+            return
+        if not self._human_voice_members(voice):
+            return
+        player = await self.players.get_or_create(guild)
+        player.reserve_activity()
+        try:
+            await connect_voice_channel(guild, voice, self.settings)
+            player.loop_current = session.loop_current
+            player.loop_queue = session.loop_queue
+            tracks = (
+                ((session.current,) if session.current is not None else ())
+                + session.queued
+            )
+            if tracks:
+                await player.enqueue_many(tracks, text)
+            await self.music_ui.post_panel(text, guild.id, session.voice_channel_id)
+        except VoiceAccessError as exc:
+            log.warning("Restore skipped for guild %s: %s", guild.id, exc)
+        finally:
+            player.release_activity()
+
+    @commands.Cog.listener()
     async def on_raw_message_delete(
         self,
         payload: discord.RawMessageDeleteEvent,
     ) -> None:
         """Forget a deleted controller without touching guild playback."""
         self.music_ui.drop_message(payload.message_id)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Release a vanished voice room so the bot can join a new channel."""
+        bot_user = self.bot.user
+        if bot_user is None or getattr(member, "id", None) != bot_user.id:
+            return
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return
+        before_id = getattr(getattr(before, "channel", None), "id", None)
+        after_id = getattr(getattr(after, "channel", None), "id", None)
+        if before_id is None or before_id == after_id:
+            return
+        async with self._operation_lock(guild.id):
+            if after_id is not None:
+                session = self.sessions.get(guild.id)
+                if (
+                    session is not None
+                    and session.active
+                    and session.voice_channel_id == before_id
+                ):
+                    await self.sessions.stop(guild.id)
+                await self.music_ui.invalidate_if_channel_changed(guild.id, after_id)
+                await self.music_ui.refresh(guild.id)
+                return
+            await self._release_disconnected_voice(guild, before_id)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(
+        self,
+        channel: discord.abc.GuildChannel,
+    ) -> None:
+        """Drop bindings when a temporary voice room or panel channel is deleted."""
+        guild = getattr(channel, "guild", None)
+        channel_id = getattr(channel, "id", None)
+        if guild is None or channel_id is None:
+            return
+        async with self._operation_lock(guild.id):
+            if isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                await self._release_disconnected_voice(
+                    guild,
+                    channel_id,
+                    require_binding=True,
+                )
+                return
+            await self.music_ui.drop_if_channel(guild.id, channel_id)
+
+    async def _release_disconnected_voice(
+        self,
+        guild: discord.Guild,
+        previous_channel_id: int,
+        *,
+        require_binding: bool = False,
+    ) -> None:
+        """Clear session/panel pins after Discord already dropped the bot."""
+        if voice_client_is_live(guild, guild.voice_client):
+            return
+
+        session = self.sessions.get(guild.id)
+        record = self.music_ui.get(guild.id)
+        session_bound = (
+            session is not None
+            and session.active
+            and session.voice_channel_id == previous_channel_id
+        )
+        panel_bound = record is not None and (
+            record.voice_channel_id == previous_channel_id
+            or getattr(record.destination, "id", None) == previous_channel_id
+        )
+        if require_binding and not session_bound and not panel_bound:
+            return
+
+        await self._stop_all_and_disconnect(guild)
+        if not guild_channel_exists(guild, previous_channel_id):
+            await self.music_ui.drop_if_channel(guild.id, previous_channel_id)
+            return
+        await self.music_ui.refresh(guild.id)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -593,9 +858,11 @@ class MusicCog(commands.Cog, name="Music"):
     async def ui_playlist_search(
         self, interaction: discord.Interaction, guild_id: int, ref: str,
         query: str, voice_channel_id: int | None = None,
+        *, owner_id: int | None = None,
     ) -> tuple[SearchResult, ...]:
+        library_owner = interaction.user.id if owner_id is None else owner_id
         self._playlist_interaction_guard(interaction, guild_id, voice_channel_id)
-        await self.playlists.get(guild_id, interaction.user.id, ref)
+        await self.playlists.get(guild_id, library_owner, ref)
         results = await self.media.search(query, limit=5)
         self._playlist_interaction_guard(interaction, guild_id, voice_channel_id)
         return tuple(results)
@@ -604,7 +871,10 @@ class MusicCog(commands.Cog, name="Music"):
         self, interaction: discord.Interaction, guild_id: int, action: str,
         args: list[str], voice_channel_id: int | None = None,
         *, expected_revision: int | None = None,
+        owner_id: int | None = None,
     ) -> str:
+        library_owner = interaction.user.id if owner_id is None else owner_id
+
         def guard() -> None:
             self._playlist_interaction_guard(
                 interaction, guild_id, voice_channel_id,
@@ -612,9 +882,13 @@ class MusicCog(commands.Cog, name="Music"):
 
         try:
             guard()
+            if library_owner == SERVER_OWNER_ID and action in {
+                "create", "rename", "delete",
+            }:
+                self._require_server_playlist_manage(interaction.user)
             if action not in {"save", "play"}:
                 return await self._edit_playlist(
-                    guild_id, interaction.user.id, action, args, guard=guard,
+                    guild_id, library_owner, action, args, guard=guard,
                     expected_revision=expected_revision,
                 )
             if len(args) != 1:
@@ -624,18 +898,15 @@ class MusicCog(commands.Cog, name="Music"):
                 member_channel = member_voice_channel(interaction.user)
                 if member_channel is None:
                     raise PlaylistError("Hãy vào một kênh thoại trước.")
-                session = self.sessions.get(guild_id)
-                channel_id = (
-                    session.voice_channel_id if session is not None and session.active
-                    else member_channel.id
-                )
+                live_id = live_voice_channel_id(interaction.guild)
+                channel_id = live_id if live_id is not None else member_channel.id
             if action == "play":
                 error = self._interaction_access_error(
                     interaction, guild_id, channel_id, allow_disconnected=True,
                 )
                 if error:
                     return error
-                saved = await self.playlists.get(guild_id, interaction.user.id, args[0])
+                saved = await self.playlists.get(guild_id, library_owner, args[0])
                 self._require_playlist_tracks(saved)
                 error = await self._enqueue_interaction_batch(
                     interaction, guild_id, channel_id,
@@ -649,8 +920,10 @@ class MusicCog(commands.Cog, name="Music"):
                 if error:
                     return error
                 tracks = self._playlist_queue_snapshot(guild_id)
+                if library_owner == SERVER_OWNER_ID:
+                    self._require_server_playlist_manage(interaction.user)
                 saved = await self.playlists.create(
-                    guild_id, interaction.user.id, args[0], tracks,
+                    guild_id, library_owner, args[0], tracks,
                 )
                 return self._playlist_saved_message(saved)
         except (PlaylistError, MediaExtractionError) as exc:
@@ -664,15 +937,7 @@ class MusicCog(commands.Cog, name="Music"):
         ctx: commands.Context[Any],
     ) -> discord.VoiceClient | None:
         """Connect a command caller without moving an occupied voice client."""
-        session = self.sessions.get(ctx.guild.id)
-        expected_channel_id = (
-            session.voice_channel_id if session is not None and session.active else None
-        )
-        voice_client = await get_or_connect_voice_client(
-            ctx,
-            self.settings,
-            expected_channel_id=expected_channel_id,
-        )
+        voice_client = await get_or_connect_voice_client(ctx, self.settings)
         if voice_client is not None and voice_client.channel is not None:
             await self.music_ui.invalidate_if_channel_changed(
                 ctx.guild.id,
@@ -715,10 +980,20 @@ class MusicCog(commands.Cog, name="Music"):
             if channel is None:
                 await ctx.send("Đã kết nối nhưng không gắn được kênh thoại.")
                 return None
+            session = self.sessions.get(ctx.guild.id)
+            if (
+                session is not None
+                and session.active
+                and session.voice_channel_id != channel.id
+            ):
+                await self.sessions.stop(ctx.guild.id)
             await self.music_ui.post_panel(
                 ctx.channel,
                 ctx.guild.id,
                 channel.id,
+            )
+            await self._persist_session(
+                ctx.guild.id, channel.id, getattr(ctx.channel, "id", None),
             )
             return channel.id
         finally:
@@ -733,18 +1008,21 @@ class MusicCog(commands.Cog, name="Music"):
         if member_channel is None:
             await ctx.send("Hãy vào một kênh thoại trước.")
             return False
-        session = self.sessions.get(ctx.guild.id)
-        expected_channel_id = (
-            session.voice_channel_id
-            if session is not None and session.active
-            else getattr(member_channel, "id", None)
-        )
-        error = same_voice_channel_error(
-            ctx.guild,
-            ctx.author,
-            expected_channel_id=expected_channel_id,
-            allow_disconnected=True,
-        )
+        # A disconnected TTS session must not pin later joins to a vanished
+        # temporary room. Only a live voice client still owns a room.
+        if live_voice_channel_id(ctx.guild) is None:
+            error = same_voice_channel_error(
+                ctx.guild,
+                ctx.author,
+                expected_channel_id=getattr(member_channel, "id", None),
+                allow_disconnected=True,
+            )
+        else:
+            error = same_voice_channel_error(
+                ctx.guild,
+                ctx.author,
+                allow_disconnected=True,
+            )
         if error is None:
             return True
         await ctx.send(error)
@@ -796,11 +1074,7 @@ class MusicCog(commands.Cog, name="Music"):
         guild = self.bot.get_guild(guild_id)
         if guild is None:
             return None
-        voice_client = guild.voice_client
-        if not voice_client or not voice_client.is_connected():
-            return None
-        channel = voice_client.channel
-        return channel.id if channel is not None else None
+        return live_voice_channel_id(guild)
 
     def ui_audio_settings(self, guild_id: int) -> GuildAudioSettings:
         """Return this guild's process-lifetime shared audio preferences."""
@@ -939,6 +1213,15 @@ class MusicCog(commands.Cog, name="Music"):
             except SoundboardError as exc:
                 return str(exc)
         return f"Đã xóa **{discord.utils.escape_markdown(entry.name)}**."
+
+    async def ui_search_soundboard(self, query: str) -> tuple[InstantHit, ...]:
+        try:
+            return await self.soundboard_service.search_instants(query, limit=5)
+        except SoundboardError:
+            raise
+        except Exception as exc:
+            log.exception("MyInstants search failed")
+            raise SoundboardError("Không tìm được âm thanh MyInstants.") from exc
 
     async def ui_ensure_panel_access(
         self,
@@ -1082,8 +1365,14 @@ class MusicCog(commands.Cog, name="Music"):
             if error:
                 return error
             player = self.players.get(guild_id)
-            skipped = bool(player and player.skip())
-        return "Đã bỏ qua." if skipped else "Không có gì đang phát."
+            if player is None:
+                return "Không có gì đang phát."
+            guild = interaction.guild
+            voters = (
+                self._voice_voter_count(guild, voice_channel_id)
+                if guild is not None else 1
+            )
+            return self._apply_vote_skip(player, interaction.user.id, voters)
 
     async def ui_toggle_loop(
         self,
@@ -1102,8 +1391,80 @@ class MusicCog(commands.Cog, name="Music"):
             player = self.players.get(guild_id)
             if player is None or player.current is None:
                 return "Không có gì đang phát."
-            enabled = player.toggle_loop()
-        return f"Chế độ lặp {'đã bật' if enabled else 'đã tắt'}."
+            mode = player.toggle_loop()
+        return self._loop_message(mode)
+
+    async def ui_previous(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction, guild_id, voice_channel_id,
+            )
+            if error:
+                return error
+            player = self.players.get(guild_id)
+            moved = bool(player and player.previous())
+        return "Đã phát bài trước." if moved else "Không có bài trước đó."
+
+    async def ui_shuffle_queue(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction, guild_id, voice_channel_id,
+            )
+            if error:
+                return error
+            player = self.players.get(guild_id)
+            if player is None:
+                return "Hàng đợi trống."
+            count = player.shuffle_queue()
+        return f"Đã xáo trộn {count} bài đang chờ." if count else "Hàng đợi trống."
+
+    async def ui_remove_queued(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        position: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction, guild_id, voice_channel_id,
+            )
+            if error:
+                return error
+            player = self.players.get(guild_id)
+            track = player.remove_queued(position) if player else None
+        if track is None:
+            return "Số thứ tự bài chờ không hợp lệ."
+        title = discord.utils.escape_markdown(track.title)
+        return f"Đã xóa **{title}** khỏi hàng đợi."
+
+    async def ui_move_queued(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        position: int,
+        destination: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction, guild_id, voice_channel_id,
+            )
+            if error:
+                return error
+            player = self.players.get(guild_id)
+            moved = bool(player and player.move_queued(position, destination))
+        return "Đã đổi chỗ bài trong hàng đợi." if moved else "Số thứ tự không hợp lệ."
 
     async def ui_jump(
         self,
@@ -1452,6 +1813,7 @@ class MusicCog(commands.Cog, name="Music"):
 
     async def close(self) -> None:
         self.players.remove_state_listener(self.music_ui.on_player_state_change)
+        self.players.remove_state_listener(self._persist_playback_state)
         await self.music_ui.close()
 
     async def _leave_voice(self, ctx: commands.Context[Any]) -> None:
@@ -1478,6 +1840,8 @@ class MusicCog(commands.Cog, name="Music"):
         voice_client = guild.voice_client
         had_player = await self.players.remove(guild.id, disconnect=False)
         had_session = await self.sessions.stop(guild.id)
+        with contextlib.suppress(PlaylistError):
+            await self.playlists.clear_playback(guild.id)
 
         disconnected = False
         if voice_client and voice_client.is_connected():

@@ -8,11 +8,13 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import discord
+from discord.ext import commands
 
 from src.media import MediaBatch, MediaExtractionError, QueuedTrack, SearchResult
 from src.cogs.music import MusicCog
 from src.music_ui import PANEL_INTERACTION_TOKEN
 from src.player import GuildAudioSettings, JumpResult
+from src.playlists import PlaybackSession
 from src.soundboard import SoundboardEntry
 
 
@@ -35,6 +37,10 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.soundboard.store.get = AsyncMock(return_value=None)
         self.soundboard.store.mp3_path = Mock(return_value=None)
         self.settings.soundboard_max_seconds = 12
+        self.playlists = Mock()
+        self.playlists.save_playback = AsyncMock()
+        self.playlists.clear_playback = AsyncMock()
+        self.playlists.list_playback = AsyncMock(return_value=())
         self.cog = MusicCog(
             self.bot,
             self.settings,
@@ -42,7 +48,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
             self.players,
             self.sessions,
             self.soundboard,
-            Mock(),
+            self.playlists,
         )
         self.ctx = AsyncMock()
         self.ctx.guild.id = 1
@@ -134,6 +140,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
         self.players.remove.assert_awaited_once_with(1, disconnect=False)
         self.sessions.stop.assert_awaited_once_with(1)
+        self.playlists.clear_playback.assert_awaited_once_with(1)
         self.ctx.voice_client.disconnect.assert_awaited()
         self.cog.music_ui.refresh.assert_awaited_once_with(1)
         sent = self.ctx.send.await_args.args[0]
@@ -159,6 +166,187 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.sessions.start.assert_called_once_with(self.ctx.guild, channel)
         self.cog.music_ui.refresh.assert_awaited_once_with(1)
         self.assertIn("theo dõi chat", self.ctx.send.await_args.args[0])
+
+    async def test_join_after_disconnect_ignores_stale_session_room(self) -> None:
+        stale_session = Mock()
+        stale_session.active = True
+        stale_session.voice_channel_id = 7
+        stale_session.voice_channel_name = "Cũ"
+        self.sessions.get.return_value = stale_session
+        self.sessions.is_active.return_value = True
+        self.sessions.start.return_value = stale_session
+        self.ctx.guild.voice_client = None
+        new_channel = MagicMock(spec=discord.VoiceChannel)
+        new_channel.id = 99
+        new_channel.name = "Mới"
+        connected = Mock()
+        connected.channel = new_channel
+        self.ctx.author.voice.channel = new_channel
+        self.cog.music_ui.invalidate_if_channel_changed = AsyncMock()
+        self.cog.music_ui.refresh = AsyncMock()
+
+        with patch(
+            "src.cogs.music.get_or_connect_voice_client",
+            new=AsyncMock(return_value=connected),
+        ) as connect:
+            await self.cog.join.callback(self.cog, self.ctx)
+
+        connect.assert_awaited_once_with(self.ctx, self.settings)
+        self.sessions.start.assert_called_once_with(self.ctx.guild, new_channel)
+
+    async def test_music_after_disconnect_does_not_require_deleted_session_room(
+        self,
+    ) -> None:
+        stale_session = Mock()
+        stale_session.active = True
+        stale_session.voice_channel_id = 7
+        self.sessions.get.return_value = stale_session
+        self.sessions.stop = AsyncMock()
+        self.ctx.guild.voice_client = None
+        new_channel = Mock()
+        new_channel.id = 99
+        self.ctx.author.voice.channel = new_channel
+        connected = Mock()
+        connected.channel = new_channel
+        player = Mock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        self.cog.music_ui.post_panel = AsyncMock()
+        self.cog.music_ui.invalidate_if_channel_changed = AsyncMock()
+
+        with patch(
+            "src.cogs.music.get_or_connect_voice_client",
+            new=AsyncMock(return_value=connected),
+        ):
+            await self.cog.music.callback(self.cog, self.ctx)
+
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.cog.music_ui.post_panel.assert_awaited_once_with(
+            self.ctx.channel,
+            1,
+            99,
+        )
+
+    async def test_music_treats_deleted_voice_channel_client_as_disconnected(
+        self,
+    ) -> None:
+        stale_channel = Mock()
+        stale_channel.id = 7
+        self.ctx.voice_client.channel = stale_channel
+        self.ctx.voice_client.is_connected.return_value = True
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        new_channel = Mock()
+        new_channel.id = 99
+        self.ctx.author.voice.channel = new_channel
+        connected = Mock()
+        connected.channel = new_channel
+        player = Mock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        self.cog.music_ui.post_panel = AsyncMock()
+        self.cog.music_ui.invalidate_if_channel_changed = AsyncMock()
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.get_or_connect_voice_client",
+            new=AsyncMock(return_value=connected),
+        ):
+            await self.cog.music.callback(self.cog, self.ctx)
+
+        self.cog.music_ui.post_panel.assert_awaited_once_with(
+            self.ctx.channel,
+            1,
+            99,
+        )
+
+    async def test_leave_cleans_up_when_bound_voice_channel_was_deleted(self) -> None:
+        session = Mock()
+        session.active = True
+        session.voice_channel_id = 7
+        self.sessions.get.return_value = session
+        self.sessions.stop = AsyncMock(return_value=True)
+        self.players.remove = AsyncMock(return_value=True)
+        self.cog.music_ui.refresh = AsyncMock()
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        other = Mock()
+        other.id = 99
+        self.ctx.author.voice.channel = other
+        self.ctx.voice_client.is_connected.return_value = False
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=False),
+        ):
+            await self.cog.leave.callback(self.cog, self.ctx)
+
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+
+    async def test_bot_voice_disconnect_stops_session_and_refreshes_panel(
+        self,
+    ) -> None:
+        self.bot.user = Mock(id=55)
+        member = Mock()
+        member.id = 55
+        member.guild = self.ctx.guild
+        before = Mock()
+        before.channel = Mock(id=7)
+        after = Mock()
+        after.channel = None
+        self.sessions.get.return_value = Mock(active=True, voice_channel_id=7)
+        self.sessions.stop = AsyncMock(return_value=True)
+        self.players.remove = AsyncMock(return_value=True)
+        self.ctx.voice_client.is_connected.return_value = False
+        self.cog.music_ui.refresh = AsyncMock()
+        self.cog.music_ui.drop_if_channel = AsyncMock()
+        self.ctx.guild.get_channel = Mock(return_value=Mock())
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=False),
+        ):
+            await self.cog.on_voice_state_update(member, before, after)
+
+        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.cog.music_ui.refresh.assert_awaited_once_with(1)
+        self.cog.music_ui.drop_if_channel.assert_not_awaited()
+
+    async def test_deleted_bound_voice_channel_drops_panel_and_session(self) -> None:
+        channel = MagicMock(spec=discord.VoiceChannel)
+        channel.id = 7
+        channel.guild = self.ctx.guild
+        self.sessions.get.return_value = Mock(active=True, voice_channel_id=7)
+        self.sessions.stop = AsyncMock(return_value=True)
+        self.players.remove = AsyncMock(return_value=True)
+        self.cog.music_ui.drop_if_channel = AsyncMock(return_value=True)
+        self.cog.music_ui.refresh = AsyncMock()
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        self.ctx.voice_client.is_connected.return_value = False
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=False),
+        ):
+            await self.cog.on_guild_channel_delete(channel)
+
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.cog.music_ui.drop_if_channel.assert_awaited_once_with(1, 7)
+        self.cog.music_ui.refresh.assert_not_awaited()
+
+    async def test_unrelated_voice_channel_delete_does_not_stop_session(self) -> None:
+        channel = MagicMock(spec=discord.VoiceChannel)
+        channel.id = 99
+        channel.guild = self.ctx.guild
+        self.sessions.get.return_value = Mock(active=True, voice_channel_id=7)
+        self.sessions.stop = AsyncMock()
+        self.players.remove = AsyncMock()
+        self.cog.music_ui.drop_if_channel = AsyncMock()
+        self.ctx.voice_client.is_connected.return_value = False
+
+        await self.cog.on_guild_channel_delete(channel)
+
+        self.sessions.stop.assert_not_awaited()
+        self.players.remove.assert_not_awaited()
+        self.cog.music_ui.drop_if_channel.assert_not_awaited()
 
     def _make_panel_interaction(self) -> MagicMock:
         interaction = MagicMock()
@@ -760,6 +948,87 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
             1,
             7,
         )
+        self.playlists.save_playback.assert_awaited()
+
+    def test_music_soundboard_and_playlist_are_hybrid_commands(self) -> None:
+        for command in (self.cog.music, self.cog.soundboard, self.cog.playlist):
+            self.assertIsInstance(command, commands.HybridCommand)
+
+    async def test_skip_records_vote_until_majority(self) -> None:
+        player = Mock()
+        player.vote_skip.return_value = ("voted", 1, 2)
+        self.players.get.return_value = player
+        self.ctx.author.id = 10
+        room = Mock()
+        room.members = [Mock(bot=False), Mock(bot=False), Mock(bot=False)]
+        self.ctx.guild.get_channel = Mock(return_value=room)
+
+        await self.cog.skip.callback(self.cog, self.ctx)
+
+        player.vote_skip.assert_called_once_with(10, voter_count=3)
+        self.assertIn("1/2", self.ctx.send.await_args.args[0])
+
+    async def test_ui_skip_uses_vote_skip(self) -> None:
+        player = Mock()
+        player.vote_skip.return_value = ("skipped", 2, 2)
+        self.players.get.return_value = player
+        interaction = self._make_panel_interaction()
+        interaction.user.id = 10
+        room = Mock()
+        room.members = [Mock(bot=False), Mock(bot=False)]
+        self.ctx.guild.get_channel = Mock(return_value=room)
+
+        result = await self.cog.ui_skip(interaction, 1, 7)
+
+        player.vote_skip.assert_called_once_with(10, voter_count=2)
+        self.assertEqual(result, "Đã bỏ qua.")
+
+    async def test_restore_rejoins_when_humans_remain(self) -> None:
+        session = PlaybackSession(
+            guild_id=1, voice_channel_id=7, text_channel_id=8,
+            loop_current=False, loop_queue=True,
+            current=QueuedTrack("Now", "https://youtu.be/now", 10),
+            queued=(QueuedTrack("Next", "https://youtu.be/next", 10),),
+        )
+        self.playlists.list_playback = AsyncMock(return_value=(session,))
+        voice = Mock()
+        voice.members = [Mock(bot=False)]
+        text = Mock()
+        text.send = AsyncMock()
+        guild = Mock()
+        guild.id = 1
+        guild.get_channel.side_effect = lambda channel_id: {7: voice, 8: text}[channel_id]
+        self.bot.get_guild.return_value = guild
+        player = Mock()
+        player.enqueue_many = AsyncMock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        self.cog.music_ui.post_panel = AsyncMock()
+
+        with patch("src.cogs.music.connect_voice_channel", new=AsyncMock()) as connect:
+            await self.cog._restore_playback_sessions()
+
+        connect.assert_awaited_once()
+        self.assertTrue(player.loop_queue)
+        player.enqueue_many.assert_awaited_once()
+        self.cog.music_ui.post_panel.assert_awaited_once_with(text, 1, 7)
+
+    async def test_restore_skips_empty_room_and_non_list_members(self) -> None:
+        session = PlaybackSession(1, 7, 8)
+        voice = Mock()
+        voice.members = []
+        text = Mock()
+        text.send = AsyncMock()
+        guild = Mock()
+        guild.get_channel.side_effect = lambda channel_id: voice if channel_id == 7 else text
+        self.bot.get_guild.return_value = guild
+        self.players.get_or_create = AsyncMock()
+
+        await self.cog._restore_one_session(session)
+        self.players.get_or_create.assert_not_awaited()
+
+        voice.members = MagicMock()
+        await self.cog._restore_one_session(session)
+        self.players.get_or_create.assert_not_awaited()
 
     async def test_music_outsider_cannot_touch_player_or_replace_panel(self) -> None:
         other_channel = Mock()

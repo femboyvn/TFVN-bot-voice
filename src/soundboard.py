@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .media import MediaURLBlockedError, _validate_url
@@ -68,6 +68,12 @@ _MEDIA_MP3_RE = re.compile(
     r"https?://(?:www\.)?myinstants\.com/media/sounds/[^\s\"'<>]+\.mp3",
     re.IGNORECASE,
 )
+_INSTANT_HREF_RE = re.compile(
+    r'href="((?:https://www\.myinstants\.com)?/[a-z]{2}/instant/([^"/]+)/)"',
+    re.IGNORECASE,
+)
+MYINSTANTS_API = "https://www.myinstants.com/api/v1/instants/"
+MYINSTANTS_SEARCH = "https://www.myinstants.com/en/search/"
 _AUDIO_MAGIC = (
     b"ID3",
     b"OggS",
@@ -234,6 +240,15 @@ class SoundboardCorruptError(SoundboardError):
 
 
 @dataclass(frozen=True, slots=True)
+class InstantHit:
+    """One MyInstants search result."""
+
+    name: str
+    page_url: str
+    mp3_url: str
+
+
+@dataclass(frozen=True, slots=True)
 class SoundboardEntry:
     """One saved clip in a guild library."""
 
@@ -305,6 +320,84 @@ def classify_soundboard_url(url: str) -> SoundKind:
             raise SoundboardError("Bảng âm thanh không nhận playlist.")
         return "youtube"
     return "direct"
+
+
+def search_myinstants(
+    query: str,
+    *,
+    fetch: FetchFn,
+    limit: int = 5,
+) -> tuple[InstantHit, ...]:
+    """Search MyInstants by keyword. Prefers the JSON API, then search HTML."""
+    query = unicodedata.normalize("NFC", query).strip()
+    if not query:
+        raise SoundboardError("Hãy nhập từ khóa MyInstants.")
+    params = urlencode({"name": query})
+    try:
+        data, content_type = fetch(f"{MYINSTANTS_API}?{params}", 1_000_000)
+        hits = _parse_myinstants_api(data, content_type, limit)
+        if hits:
+            return hits
+    except SoundboardError:
+        raise
+    except Exception:
+        log.warning("MyInstants API search failed for %r", query, exc_info=True)
+    data, _content_type = fetch(f"{MYINSTANTS_SEARCH}?{params}", 1_000_000)
+    html = data.decode("utf-8", errors="replace")
+    hits = _parse_myinstants_search_html(html, limit)
+    if not hits:
+        raise SoundboardError("Không tìm thấy âm thanh MyInstants.")
+    return hits
+
+
+def _parse_myinstants_api(
+    data: bytes, content_type: str, limit: int,
+) -> tuple[InstantHit, ...]:
+    if "json" not in content_type.lower() and not data.lstrip().startswith(b"{") and not data.lstrip().startswith(b"["):
+        return ()
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ()
+    rows = payload.get("results") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return ()
+    hits: list[InstantHit] = []
+    for row in rows:
+        if not isinstance(row, dict) or len(hits) >= limit:
+            break
+        name = str(row.get("name") or row.get("title") or "").strip()
+        mp3 = str(row.get("mp3") or row.get("sound") or "").strip()
+        slug = str(row.get("slug") or row.get("id") or "").strip()
+        page = str(row.get("url") or "").strip()
+        if not page and slug:
+            page = f"https://www.myinstants.com/en/instant/{slug}/"
+        if not name or not (mp3 or page):
+            continue
+        if mp3 and not mp3.startswith("http"):
+            mp3 = f"https://www.myinstants.com{mp3}"
+        hits.append(InstantHit(name[:32] or slug, page or mp3, mp3 or page))
+    return tuple(hits)
+
+
+def _parse_myinstants_search_html(html: str, limit: int) -> tuple[InstantHit, ...]:
+    hits: list[InstantHit] = []
+    seen: set[str] = set()
+    for match in _INSTANT_HREF_RE.finditer(html):
+        slug = match.group(2)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        path = match.group(1)
+        page = (
+            path if path.startswith("http")
+            else f"https://www.myinstants.com{path}"
+        )
+        name = slug.replace("-", " ").strip() or slug
+        hits.append(InstantHit(name[:32], page, page))
+        if len(hits) >= limit:
+            break
+    return tuple(hits)
 
 
 def parse_myinstants_audio_url(html: str) -> str | None:
@@ -1026,6 +1119,14 @@ class SoundboardService:
 
     async def list(self, guild_id: int) -> tuple[SoundboardEntry, ...]:
         return await self.store.list(guild_id)
+
+    async def search_instants(self, query: str, *, limit: int = 5) -> tuple[InstantHit, ...]:
+        return await asyncio.to_thread(
+            search_myinstants,
+            query,
+            fetch=self.ingest._fetch,
+            limit=limit,
+        )
 
     async def add_sound(
         self,

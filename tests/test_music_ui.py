@@ -34,8 +34,13 @@ def _snapshot(
     current: QueuedTrack | None = None,
     queued: tuple[QueuedTrack, ...] = (),
     loop: bool = False,
+    loop_queue: bool = False,
+    can_previous: bool = False,
 ) -> PlayerSnapshot:
-    return PlayerSnapshot(current=current, queued=queued, state=state, loop_current=loop)
+    return PlayerSnapshot(
+        current=current, queued=queued, state=state, loop_current=loop,
+        loop_queue=loop_queue, can_previous=can_previous,
+    )
 
 
 class _Actions:
@@ -53,6 +58,10 @@ class _Actions:
         self.ui_pause = AsyncMock(return_value="Đã tạm dừng.")
         self.ui_resume = AsyncMock(return_value="Đã tiếp tục.")
         self.ui_skip = AsyncMock(return_value="Đã bỏ qua.")
+        self.ui_previous = AsyncMock(return_value="Đã phát bài trước.")
+        self.ui_shuffle_queue = AsyncMock(return_value="Đã xáo trộn.")
+        self.ui_remove_queued = AsyncMock(return_value="Đã xóa.")
+        self.ui_move_queued = AsyncMock(return_value="Đã đổi chỗ.")
         self.ui_toggle_loop = AsyncMock(return_value="Đã bật lặp.")
         self.ui_jump = AsyncMock(return_value="Đã tua.")
         self.ui_clear_queue = AsyncMock(return_value="Đã xóa.")
@@ -134,10 +143,22 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in embed.fields}
         self.assertEqual(values["Kênh thoại"], "<#123>")
         self.assertIn("Bài thử", values["Bài hiện tại"])
-        self.assertEqual(values["Lặp bài"], "Bật")
+        self.assertEqual(values["Lặp"], "Bài")
         self.assertEqual(values["Đang chờ"], "7")
         self.assertIn("Bài 5", values["Tiếp theo"])
         self.assertNotIn("Bài 6", values["Tiếp theo"])
+        queue_loop = build_music_embed(
+            123,
+            _snapshot(
+                state=PlaybackState.PLAYING,
+                current=self.track,
+                loop_queue=True,
+            ),
+        )
+        self.assertEqual(
+            {field.name: field.value for field in queue_loop.fields}["Lặp"],
+            "Hàng đợi",
+        )
 
     def test_embed_shows_public_audio_settings(self) -> None:
         embed = build_music_embed(
@@ -221,6 +242,15 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(idle.pause_resume.disabled)
         self.assertFalse(idle.show_queue.disabled)
         self.assertEqual(idle.loop_track.style, discord.ButtonStyle.primary)
+        self.assertEqual(idle.loop_track.label, "Lặp bài")
+        self.assertTrue(idle.previous_track.disabled)
+
+        idle.sync(_snapshot(
+            state=PlaybackState.PLAYING, current=self.track,
+            loop_queue=True, can_previous=True,
+        ))
+        self.assertEqual(idle.loop_track.label, "Lặp hàng")
+        self.assertFalse(idle.previous_track.disabled)
 
         idle.sync(
             _snapshot(
@@ -239,8 +269,8 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             row: sum(child.row == row for child in view.children)
             for row in range(4)
         }
-        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 3})
-        self.assertEqual(len(view.children), 15)
+        self.assertEqual(controls_per_row, {0: 5, 1: 4, 2: 4, 3: 3})
+        self.assertEqual(len(view.children), 16)
         self.assertEqual(view.open_soundboard.label, "Bảng âm thanh")
         self.assertEqual(view.show_help.label, "Trợ giúp")
         self.assertFalse(view.show_help.disabled)
@@ -710,6 +740,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_loop_and_stop_delegate_to_matching_actions(self) -> None:
         for button, action in (
             (self.view.next_track, self.actions.ui_skip),
+            (self.view.previous_track, self.actions.ui_previous),
             (self.view.loop_track, self.actions.ui_toggle_loop),
             (self.view.stop_music, self.actions.ui_stop),
         ):
@@ -717,6 +748,13 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 interaction = _interaction()
                 await button.callback(interaction)
                 action.assert_awaited_once_with(interaction, 1, 2)
+
+    async def test_queue_shuffle_delegates_to_panel_action(self) -> None:
+        queued = (self.track, self.track)
+        paginator = QueuePaginatorView(10, queued, panel_view=self.view)
+        interaction = _interaction()
+        await paginator.shuffle_tracks.callback(interaction)
+        self.actions.ui_shuffle_queue.assert_awaited_once_with(interaction, 1, 2)
 
     async def test_jump_and_clear_buttons_open_their_dialogs(self) -> None:
         jump_interaction = _interaction()
@@ -1136,6 +1174,23 @@ class PanelManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.invalidate_if_channel_changed(1, 3))
         self.assertIsNone(manager.get(1))
         message.edit.assert_awaited_once()
+
+    async def test_drop_if_channel_disables_panel_bound_to_deleted_room(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        destination = MagicMock()
+        destination.id = 2
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+
+        self.assertFalse(await manager.drop_if_channel(1, 99))
+        self.assertIsNotNone(manager.get(1))
+        self.assertTrue(await manager.drop_if_channel(1, 2))
+        self.assertIsNone(manager.get(1))
+        message.edit.assert_awaited()
 
     async def test_refresh_drops_deleted_panel_without_touching_playback(self) -> None:
         actions = _Actions(_snapshot())

@@ -91,6 +91,7 @@ class Settings:
     playlist_db_path: str = DEFAULT_PLAYLIST_DB_PATH
     playlist_max_per_user: int = 20
     playlist_max_tracks: int = 100
+    playlist_max_server: int = 20
     playlist_backup_minutes: int = 0
     r2_account_id: str = ""
     r2_endpoint: str = ""
@@ -209,6 +210,7 @@ class Settings:
             ),
             playlist_max_per_user=_read_int(environment, "PLAYLIST_MAX_PER_USER", 20),
             playlist_max_tracks=_read_int(environment, "PLAYLIST_MAX_TRACKS", 100),
+            playlist_max_server=_read_int(environment, "PLAYLIST_MAX_SERVER", 20),
             playlist_backup_minutes=_read_int(environment, "PLAYLIST_BACKUP_MINUTES", 0),
         )
         settings._validate()
@@ -282,6 +284,8 @@ class Settings:
             raise ConfigurationError("PLAYLIST_MAX_PER_USER must be between 1 and 100")
         if not 1 <= self.playlist_max_tracks <= 1000:
             raise ConfigurationError("PLAYLIST_MAX_TRACKS must be between 1 and 1000")
+        if not 1 <= self.playlist_max_server <= 100:
+            raise ConfigurationError("PLAYLIST_MAX_SERVER must be between 1 and 100")
         if not 0 <= self.playlist_backup_minutes <= 10080:
             raise ConfigurationError("PLAYLIST_BACKUP_MINUTES must be between 0 and 10080")
         if self.playlist_backup_minutes and not self.r2_configured:

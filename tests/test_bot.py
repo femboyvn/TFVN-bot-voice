@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from discord.ext import commands
+
 from src.bot import create_bot
 from src.config import Settings
 from src.help_ui import COMMAND_HELP, InteractiveHelpCommand
@@ -41,6 +43,11 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(hasattr(bot, "sessions"))
             self.assertIs(bot.get_cog("Music").playlists, bot.playlists)
             self.assertIsNone(bot.playlist_backups)
+            hybrid_names = {
+                command.name for command in bot.commands
+                if isinstance(command, commands.HybridCommand)
+            }
+            self.assertEqual(hybrid_names, {"music", "soundboard", "playlist"})
 
         finally:
             await bot.close()

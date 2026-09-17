@@ -21,8 +21,9 @@ from .soundboard import ObjectStore
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_PLAYLIST_NAME = 64
+SERVER_OWNER_ID = 0
 
 
 class PlaylistError(RuntimeError):
@@ -38,6 +39,23 @@ class SavedPlaylist:
     tracks: tuple[QueuedTrack, ...]
     created_at: str
     revision: int = 0
+
+    @property
+    def is_server(self) -> bool:
+        return self.owner_id == SERVER_OWNER_ID
+
+
+@dataclass(frozen=True, slots=True)
+class PlaybackSession:
+    """Last bound room and canonical queue for restart restore."""
+
+    guild_id: int
+    voice_channel_id: int
+    text_channel_id: int
+    loop_current: bool = False
+    loop_queue: bool = False
+    current: QueuedTrack | None = None
+    queued: tuple[QueuedTrack, ...] = ()
 
 
 async def _in_thread(operation: Callable[[], T]) -> T:
@@ -73,10 +91,12 @@ class PlaylistStore:
         *,
         max_per_user: int = 20,
         max_tracks: int = 100,
+        max_per_server: int = 20,
     ) -> None:
         self.path = path.expanduser().resolve()
         self.max_per_user = max_per_user
         self.max_tracks = max_tracks
+        self.max_per_server = max_per_server
 
     @contextlib.contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -87,7 +107,7 @@ class PlaylistStore:
             db.execute("BEGIN IMMEDIATE")
             with db:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, SCHEMA_VERSION):
+                if version not in (0, 1, SCHEMA_VERSION):
                     raise PlaylistError(
                         "Phiên bản thư viện chưa được hỗ trợ. Hãy cập nhật bot."
                     )
@@ -113,6 +133,29 @@ class PlaylistStore:
                             url TEXT NOT NULL,
                             duration INTEGER CHECK (duration >= 0),
                             PRIMARY KEY (playlist_id, position)
+                        )
+                    """)
+                    version = 1
+                if version == 1:
+                    db.execute("""
+                        CREATE TABLE IF NOT EXISTS guild_sessions (
+                            guild_id TEXT PRIMARY KEY,
+                            voice_channel_id TEXT NOT NULL,
+                            text_channel_id TEXT NOT NULL,
+                            loop_current INTEGER NOT NULL DEFAULT 0,
+                            loop_queue INTEGER NOT NULL DEFAULT 0,
+                            updated_at TEXT NOT NULL
+                        )
+                    """)
+                    db.execute("""
+                        CREATE TABLE IF NOT EXISTS guild_queue (
+                            guild_id TEXT NOT NULL,
+                            position INTEGER NOT NULL,
+                            is_current INTEGER NOT NULL DEFAULT 0,
+                            title TEXT NOT NULL,
+                            url TEXT NOT NULL,
+                            duration INTEGER CHECK (duration >= 0),
+                            PRIMARY KEY (guild_id, position)
                         )
                     """)
                     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -156,7 +199,11 @@ class PlaylistStore:
             (str(guild_id), str(owner_id), ref, name_key, ref),
         ).fetchone()
         if row is None:
-            raise PlaylistError("Không tìm thấy danh sách phát của bạn.")
+            raise PlaylistError(
+                "Không tìm thấy danh sách phát của máy chủ."
+                if owner_id == SERVER_OWNER_ID else
+                "Không tìm thấy danh sách phát của bạn."
+            )
         return self._decode(db, row)
 
     def _validate_tracks(
@@ -225,9 +272,15 @@ class PlaylistStore:
                 "SELECT COUNT(*) FROM playlists WHERE guild_id = ? "
                 "AND owner_id = ?", (str(guild_id), str(owner_id)),
             ).fetchone()[0]
-            if count >= self.max_per_user:
+            limit = (
+                self.max_per_server if owner_id == SERVER_OWNER_ID
+                else self.max_per_user
+            )
+            if count >= limit:
                 raise PlaylistError(
-                    f"Bạn có thể lưu tối đa {self.max_per_user} danh sách "
+                    f"Máy chủ có thể lưu tối đa {limit} danh sách chung."
+                    if owner_id == SERVER_OWNER_ID else
+                    f"Bạn có thể lưu tối đa {limit} danh sách "
                     "trong máy chủ này."
                 )
             playlist_id = uuid.uuid4().hex
@@ -240,7 +293,11 @@ class PlaylistStore:
                      name.casefold(), datetime.now(timezone.utc).isoformat()),
                 )
             except sqlite3.IntegrityError as exc:
-                raise PlaylistError("Bạn đã có danh sách phát trùng tên.") from exc
+                raise PlaylistError(
+                    "Máy chủ đã có danh sách phát trùng tên."
+                    if owner_id == SERVER_OWNER_ID else
+                    "Bạn đã có danh sách phát trùng tên."
+                ) from exc
             self._write_tracks(db, playlist_id, tracks)
             return self._get(db, guild_id, owner_id, playlist_id)
         return await self._run(write)
@@ -259,7 +316,11 @@ class PlaylistStore:
                     (name, name.casefold(), playlist.id),
                 )
             except sqlite3.IntegrityError as exc:
-                raise PlaylistError("Bạn đã có danh sách phát trùng tên.") from exc
+                raise PlaylistError(
+                    "Máy chủ đã có danh sách phát trùng tên."
+                    if owner_id == SERVER_OWNER_ID else
+                    "Bạn đã có danh sách phát trùng tên."
+                ) from exc
             return self._get(db, guild_id, owner_id, playlist.id)
         return await self._run(write)
 
@@ -304,6 +365,110 @@ class PlaylistStore:
             self._write_tracks(db, playlist.id, tracks)
             return self._get(db, guild_id, owner_id, playlist.id)
         return await self._run(write)
+
+    async def save_playback(
+        self,
+        guild_id: int,
+        voice_channel_id: int,
+        text_channel_id: int,
+        *,
+        current: QueuedTrack | None,
+        queued: Sequence[QueuedTrack],
+        loop_current: bool = False,
+        loop_queue: bool = False,
+    ) -> None:
+        """Replace the persisted room binding and canonical queue."""
+        tracks = []
+        if current is not None:
+            tracks.append((current, 1))
+        tracks.extend((track, 0) for track in queued)
+
+        def write(db: sqlite3.Connection) -> None:
+            db.execute(
+                "INSERT INTO guild_sessions "
+                "(guild_id, voice_channel_id, text_channel_id, loop_current, "
+                "loop_queue, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET "
+                "voice_channel_id = excluded.voice_channel_id, "
+                "text_channel_id = excluded.text_channel_id, "
+                "loop_current = excluded.loop_current, "
+                "loop_queue = excluded.loop_queue, "
+                "updated_at = excluded.updated_at",
+                (
+                    str(guild_id),
+                    str(voice_channel_id),
+                    str(text_channel_id),
+                    int(loop_current),
+                    int(loop_queue),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            db.execute("DELETE FROM guild_queue WHERE guild_id = ?", (str(guild_id),))
+            db.executemany(
+                "INSERT INTO guild_queue "
+                "(guild_id, position, is_current, title, url, duration) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    (str(guild_id), index, is_current, track.title, track.webpage_url,
+                     track.duration)
+                    for index, (track, is_current) in enumerate(tracks, 1)
+                ),
+            )
+
+        await self._run(write)
+
+    async def load_playback(self, guild_id: int) -> PlaybackSession | None:
+        def read(db: sqlite3.Connection) -> PlaybackSession | None:
+            return self._decode_session(db, str(guild_id))
+        return await self._run(read)
+
+    async def list_playback(self) -> tuple[PlaybackSession, ...]:
+        def read(db: sqlite3.Connection) -> tuple[PlaybackSession, ...]:
+            rows = db.execute("SELECT guild_id FROM guild_sessions").fetchall()
+            sessions = []
+            for row in rows:
+                session = self._decode_session(db, row["guild_id"])
+                if session is not None:
+                    sessions.append(session)
+            return tuple(sessions)
+        return await self._run(read)
+
+    async def clear_playback(self, guild_id: int) -> None:
+        def write(db: sqlite3.Connection) -> None:
+            db.execute("DELETE FROM guild_queue WHERE guild_id = ?", (str(guild_id),))
+            db.execute("DELETE FROM guild_sessions WHERE guild_id = ?", (str(guild_id),))
+        await self._run(write)
+
+    @staticmethod
+    def _decode_session(
+        db: sqlite3.Connection, guild_id: str,
+    ) -> PlaybackSession | None:
+        row = db.execute(
+            "SELECT * FROM guild_sessions WHERE guild_id = ?", (guild_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        current = None
+        queued: list[QueuedTrack] = []
+        for track in db.execute(
+            "SELECT is_current, title, url, duration FROM guild_queue "
+            "WHERE guild_id = ? ORDER BY position",
+            (guild_id,),
+        ):
+            item = QueuedTrack(track["title"], track["url"], track["duration"])
+            if track["is_current"] and current is None:
+                current = item
+            else:
+                queued.append(item)
+        return PlaybackSession(
+            int(row["guild_id"]),
+            int(row["voice_channel_id"]),
+            int(row["text_channel_id"]),
+            bool(row["loop_current"]),
+            bool(row["loop_queue"]),
+            current,
+            tuple(queued),
+        )
 
     async def backup(self, remote: ObjectStore) -> None:
         """Upload a consistent snapshot; staging stays on the database volume."""

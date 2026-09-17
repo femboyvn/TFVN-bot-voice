@@ -2,11 +2,12 @@
 
 A focused Discord voice bot built with `discord.py` and `yt-dlp`. It supports a shared
 Discord music-control panel, URL and YouTube-playlist playback, Spotify links,
-YouTube search,
-per-server queues, pause/resume, timestamp jumps, skip, looping, a **custom
-soundboard** (MyInstants/YouTube clips saved as MP3), TTS "now playing"
-announcements, and **voice-chat sessions** that join a VC and read that channel's text
-chat aloud (via gTTS).
+YouTube search, per-server queues, pause/resume, previous, timestamp jumps,
+majority vote-skip, track/queue looping, slash aliases (`/music`, `/soundboard`,
+`/playlist`), a **custom soundboard** (MyInstants search, YouTube, or direct clips
+saved as MP3), personal and **server playlists**, TTS "now playing" announcements,
+queue restore after restart, and **voice-chat sessions** that join a VC and read
+that channel's text chat aloud (via gTTS).
 
 User-facing Discord replies and spoken TTS phrases are in **Vietnamese** (customer UI).
 Source comments, logs, and this README stay in English.
@@ -44,9 +45,9 @@ The default prefix is `!tfd `, including the trailing space.
 | Command | Description |
 | --- | --- |
 | `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
-| `!tfd music` | Join your VC and open its shared interactive music panel |
-| `!tfd soundboard` | Join your VC, open the music panel, and open the custom soundboard |
-| `!tfd playlist` | Open your saved personal playlists; `!tfd help playlist` lists editing commands |
+| `!tfd music` / `/music` | Join your VC and open its shared interactive music panel |
+| `!tfd soundboard` / `/soundboard` | Join your VC, open the music panel, and open the custom soundboard |
+| `!tfd playlist` / `/playlist` | Open personal or server playlists; `!tfd help playlist` lists editing commands |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
@@ -55,21 +56,22 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd pause` | Pause playback |
 | `!tfd resume` | Resume playback |
 | `!tfd jump HH:MM:SS` | Jump to a timestamp in the current track |
-| `!tfd skip` | Skip the current track |
-| `!tfd loop` | Toggle looping for the current track |
+| `!tfd skip` | Vote to skip; a majority of humans in the voice channel cuts the track |
+| `!tfd loop` | Cycle looping: off → current track → whole queue |
 | `!tfd stop` | Stop the current track and clear the queue without leaving voice |
 | `!tfd search <query>` | Show five YouTube search results |
 
 ### Shared music panel
 
 1. Join a voice channel and run `!tfd music`.
-2. Use **Thêm nhạc** to enter a search phrase, YouTube URL, Spotify URL, or playlist URL.
+2. Use **Tìm bài** to enter a search phrase, YouTube URL, Spotify URL, or playlist URL.
    Plain queries show up to five ephemeral numbered results; press the matching
    **1**–**5** button to append one to the queue.
 3. A playlist appends its available videos in order, inspecting at most the first 25
    entries per request. Unavailable entries are skipped.
-4. Everyone in the bot's current voice channel can use pause/resume, next/skip, loop,
-   timestamp jump, queue view, clear queue, stop, **Đọc tên bài**,
+4. Everyone in the bot's current voice channel can use pause/resume, previous, next
+   (majority vote-skip), loop (off → track → queue), timestamp jump, queue view
+   (shuffle / remove / move waiting tracks), clear queue, stop, **Đọc tên bài**,
    **Đọc tin nhắn**, **Bảng âm thanh**, **Cài đặt**, and **Rời**. Members outside that channel,
    including administrators, cannot use these controls or move the bot.
    **Trợ giúp** is an exception: anyone who can see the panel may open the private
@@ -92,7 +94,8 @@ The default prefix is `!tfd `, including the trailing space.
    reposts the panel at that interval.
 8. **Bảng âm thanh** (or `!tfd soundboard`) opens a room-bound picker of short
    clips saved for this Discord server. **Thêm** accepts a MyInstants page/mp3,
-   a YouTube URL, or a direct audio link; the bot downloads at most 12 seconds,
+   a YouTube URL, a direct audio link, or a MyInstants keyword (up to five
+   numbered hits); the bot downloads at most 12 seconds,
    stores an MP3 plus a JSON index on disk, and plays the clip over music with
    the same ducking used for TTS. Anyone in the bound voice room can play;
    only the member who added a clip (or someone with **Manage Server**) can
@@ -123,7 +126,8 @@ panel disables the old one. An automatic bump sends a fresh panel at the bottom 
 the same text channel and then deletes the superseded panel, without changing music,
 queue, voice-room binding, or TTS state. If deleting the old message fails, its
 controls are disabled instead. Automatic bumps pause while the bot is disconnected.
-After a bot restart, run `!tfd music` again. **Xóa hàng đợi** removes waiting tracks
+After a bot restart, the bot rejoins the last bound voice room and restores the
+queue when at least one human is still there. **Xóa hàng đợi** removes waiting tracks
 but leaves the current track playing. **Dừng** stops the current track and clears the
 queue without ending chat reading or immediately leaving voice; `!tfd leave` stops
 music, ends chat reading, and disconnects. When chat reading is off, the normal player
@@ -133,11 +137,14 @@ All voice and playback commands use the same room rule as the panel. If the bot 
 already connected to another voice channel, it stays there and tells the caller to join
 that channel instead.
 
-### Saved personal playlists
+### Saved playlists
 
 Click **My Playlist** on the music panel, or run `!tfd playlist` and click
 **Danh sách của tôi** to open a private picker. Each member has their own library
 in each Discord server. Only that member can browse, edit, delete, or load it.
+**Máy chủ** (or `!tfd playlist server list`) switches to shared server playlists.
+Anyone in the room can play or add tracks to a server list; creating, renaming,
+deleting, or saving the queue into a server list requires **Manage Server**.
 The picker supports creating and renaming playlists, adding songs from URLs or
 five numbered search results, removing songs, and moving a song by its position.
 Playlist and track lists are paginated. Editing a song from an outdated form is
@@ -164,11 +171,14 @@ controls. A picker opened from a panel stays bound to that panel and room.
 | `!tfd playlist remove "Nhạc mới" 2` | Remove song 2 |
 | `!tfd playlist move "Nhạc mới" 3 1` | Move song 3 to position 1 |
 | `!tfd playlist delete "Nhạc mới"` | Delete a playlist; the picker also offers a confirmation dialog |
+| `!tfd playlist server list` | Open the shared server library |
+| `!tfd playlist server create "Chung"` | Create a server playlist (Manage Server) |
 
 Quote names containing spaces. Names are unique per member and server after
 Unicode normalization and case folding. Creating or saving with an existing name
 returns an error. The default limits are 20 playlists per member per server
-(`PLAYLIST_MAX_PER_USER`, range 1–100) and 100 songs per playlist
+(`PLAYLIST_MAX_PER_USER`, range 1–100), 20 server playlists
+(`PLAYLIST_MAX_SERVER`, range 1–100), and 100 songs per playlist
 (`PLAYLIST_MAX_TRACKS`, range 1–1000). External playlist imports inspect at most
 25 entries per request, matching normal playback. An add or save exceeding the
 song limit is rejected as a whole; existing songs remain intact.

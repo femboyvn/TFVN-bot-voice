@@ -31,6 +31,7 @@ from src.soundboard import (
     normalize_sound_name,
     parse_myinstants_audio_url,
     remote_object_key,
+    search_myinstants,
 )
 
 
@@ -135,6 +136,45 @@ class SoundboardHelperTests(unittest.TestCase):
             "https://www.myinstants.com/media/sounds/only.mp3",
         )
         self.assertIsNone(parse_myinstants_audio_url("<html></html>"))
+
+    def test_search_myinstants_prefers_json_api(self) -> None:
+        payload = json.dumps({
+            "results": [
+                {
+                    "name": "Vine Boom",
+                    "slug": "vine-boom-sound-70972",
+                    "mp3": "https://www.myinstants.com/media/sounds/vine-boom.mp3",
+                }
+            ]
+        }).encode()
+
+        def fetch(url: str, max_bytes: int) -> tuple[bytes, str]:
+            self.assertIn("/api/v1/instants/", url)
+            return payload, "application/json"
+
+        hits = search_myinstants("vine", fetch=fetch, limit=5)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "Vine Boom")
+        self.assertIn("vine-boom", hits[0].page_url)
+
+    def test_search_myinstants_falls_back_to_html(self) -> None:
+        html = (
+            '<a href="/en/instant/bruh-123/">ignored</a>'
+            '<a href="/en/instant/bruh-123/">again</a>'
+            '<a href="/en/instant/wow-2/">wow</a>'
+        ).encode()
+        calls: list[str] = []
+
+        def fetch(url: str, max_bytes: int) -> tuple[bytes, str]:
+            calls.append(url)
+            if "/api/" in url:
+                return b"nope", "text/plain"
+            return html, "text/html"
+
+        hits = search_myinstants("bruh", fetch=fetch, limit=5)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(hits[0].page_url, "https://www.myinstants.com/en/instant/bruh-123/")
+        self.assertTrue(any("/search/" in url for url in calls))
 
     def test_ffmpeg_argv_trims_and_encodes_mp3(self) -> None:
         command = ffmpeg_encode_command(Path("in.wav"), Path("out.mp3"), 12)

@@ -55,8 +55,9 @@ class HelpCopyTests(unittest.TestCase):
         embed = build_help_embed("panel", "!bot ")
         values = "\n".join(field.value for field in embed.fields)
         for label in (
-            "Thêm nhạc",
+            "Tìm bài",
             "Tạm dừng",
+            "Trước",
             "Bài tiếp",
             "Lặp",
             "Tua đến",
@@ -73,6 +74,8 @@ class HelpCopyTests(unittest.TestCase):
             self.assertIn(label, values)
         self.assertIn("`!bot music`", embed.description)
         self.assertIn("Spotify", values)
+        self.assertIn("nửa phòng", values)
+        self.assertIn("lặp cả hàng đợi", values)
         for field in embed.fields:
             self.assertLessEqual(len(field.value), 1024)
 
@@ -104,6 +107,18 @@ class HelpCopyTests(unittest.TestCase):
         self.assertIn("Đọc tên người gửi", settings)
         self.assertIn("`on` hoặc `off`", settings)
         self.assertIn("mặc định `off`", settings)
+
+    def test_every_command_help_embed_fits_discord_limits(self) -> None:
+        for name in COMMAND_HELP:
+            with self.subTest(name=name):
+                embed = build_command_help_embed(name, "!tfd ")
+                self.assertIsNotNone(embed)
+                assert embed is not None
+                self.assertLessEqual(len(embed.title or ""), 256)
+                self.assertLessEqual(len(embed.description or ""), 4096)
+                for field in embed.fields:
+                    self.assertLessEqual(len(field.name), 256)
+                    self.assertLessEqual(len(field.value), 1024)
 
     def test_command_page_includes_usage_and_details(self) -> None:
         embed = build_command_help_embed("jump", "!tfd ")

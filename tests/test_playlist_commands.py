@@ -13,7 +13,7 @@ from src.config import Settings
 from src.media import MediaBatch, MediaExtractionError, QueuedTrack
 from src.music_ui import PANEL_INTERACTION_TOKEN
 from src.player import PlaybackState, PlayerSnapshot
-from src.playlists import PlaylistError, PlaylistStore
+from src.playlists import SERVER_OWNER_ID, PlaylistError, PlaylistStore
 
 
 class PlaylistCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -241,3 +241,40 @@ class PlaylistCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("đã thay đổi", result)
         self.assertEqual(await self.store.get(1, 10, saved.id), updated)
+
+    async def test_server_create_requires_manage_guild(self) -> None:
+        self.ctx.author.guild_permissions.manage_guild = False
+        message = await self.run_command('server create "Chung"')
+        self.assertIn("Quản lý máy chủ", message)
+        self.assertEqual(await self.store.list(1, SERVER_OWNER_ID), ())
+
+    async def test_server_create_and_play_use_shared_owner(self) -> None:
+        self.ctx.author.guild_permissions.manage_guild = True
+        message = await self.run_command('server create "Chung"')
+        self.assertIn("Đã lưu", message)
+        saved = await self.store.get(1, SERVER_OWNER_ID, "Chung")
+        self.assertTrue(saved.is_server)
+        tracks = (QueuedTrack("A", "https://youtu.be/a"),)
+        await self.store.append(1, SERVER_OWNER_ID, saved.id, tracks)
+        self.ctx.author.guild_permissions.manage_guild = False
+        with patch("src.cogs.music.get_or_connect_voice_client", new=AsyncMock(
+            return_value=self.ctx.voice_client,
+        )):
+            message = await self.run_command('server play "Chung"')
+        self.player.enqueue_many.assert_awaited_once_with(tracks, self.ctx.channel)
+        self.assertIn("1 bài", message)
+
+    async def test_server_list_opens_shared_launcher(self) -> None:
+        message = await self.run_command("server")
+        self.assertIn("chung của máy chủ", message)
+        view = self.ctx.send.await_args.kwargs["view"]
+        self.assertTrue(view.server)
+
+    async def test_ui_server_create_requires_manage_guild(self) -> None:
+        interaction = self.interaction()
+        interaction.user.guild_permissions.manage_guild = False
+        result = await self.cog.ui_playlist_action(
+            interaction, 1, "create", ["Chung"], owner_id=SERVER_OWNER_ID,
+        )
+        self.assertIn("Quản lý máy chủ", result)
+        self.assertEqual(await self.store.list(1, SERVER_OWNER_ID), ())

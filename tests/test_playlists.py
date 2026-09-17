@@ -222,6 +222,45 @@ class PlaylistStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(remote.objects["playlists/latest.sqlite3"], b"existing backup")
         self.assertFalse(self.path.exists())
 
+    async def test_server_playlists_are_isolated_from_personal(self) -> None:
+        shared = await self.store.create(1, 0, "Chung", (track(1),))
+        self.assertTrue(shared.is_server)
+        self.assertEqual(await self.store.list(1, 10), ())
+        self.assertEqual(await self.store.get(1, 0, "chung"), shared)
+        personal = await self.store.create(1, 10, "Chung", (track(2),))
+        self.assertFalse(personal.is_server)
+        self.assertEqual(await self.store.list(1, 0), (shared,))
+
+    async def test_playback_session_roundtrip_and_clear(self) -> None:
+        await self.store.save_playback(
+            9, 7, 8,
+            current=track(1),
+            queued=(track(2), track(3)),
+            loop_current=False,
+            loop_queue=True,
+        )
+        session = await self.store.load_playback(9)
+        self.assertIsNotNone(session)
+        assert session is not None
+        self.assertEqual(session.voice_channel_id, 7)
+        self.assertEqual(session.text_channel_id, 8)
+        self.assertEqual(session.current, track(1))
+        self.assertEqual(session.queued, (track(2), track(3)))
+        self.assertTrue(session.loop_queue)
+        self.assertEqual(await self.store.list_playback(), (session,))
+        await self.store.clear_playback(9)
+        self.assertIsNone(await self.store.load_playback(9))
+
+    async def test_server_quota_and_duplicate_name_use_server_copy(self) -> None:
+        store = PlaylistStore(self.path, max_per_user=5, max_per_server=1)
+        await store.create(1, 0, "Chung")
+        with self.assertRaisesRegex(PlaylistError, "Máy chủ có thể lưu tối đa"):
+            await store.create(1, 0, "Khác")
+        roomy = PlaylistStore(self.path, max_per_user=5, max_per_server=5)
+        with self.assertRaisesRegex(PlaylistError, "Máy chủ đã có danh sách"):
+            await roomy.create(1, 0, "chung")
+        await roomy.create(1, 10, "Chung")
+
 
 class PlaylistBackupLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_upload_is_retried_at_next_interval(self) -> None:

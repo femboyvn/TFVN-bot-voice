@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 
-from src.soundboard import SoundboardEntry
+from src.soundboard import InstantHit, SoundboardEntry
 from src.soundboard_ui import (
     SOUNDBOARD_PAGE_SIZE,
     AddSoundModal,
+    SoundSearchView,
     SoundboardSelect,
     SoundboardView,
     build_soundboard_embed,
@@ -35,6 +36,7 @@ class _Actions:
         self.ui_play_soundboard = AsyncMock(return_value="Đã phát.")
         self.ui_add_soundboard = AsyncMock(return_value="Đã lưu.")
         self.ui_remove_soundboard = AsyncMock(return_value="Đã xóa.")
+        self.ui_search_soundboard = AsyncMock(return_value=())
 
     async def ui_list_soundboard(self, guild_id: int) -> tuple[SoundboardEntry, ...]:
         return self.entries
@@ -109,6 +111,59 @@ class SoundboardUiTests(unittest.IsolatedAsyncioTestCase):
         for child in view.children:
             if hasattr(child, "disabled"):
                 self.assertTrue(child.disabled)
+
+    def _modal_interaction(self) -> MagicMock:
+        value = MagicMock(spec=discord.Interaction)
+        value.response.is_done.return_value = False
+        value.response.defer = AsyncMock()
+        value.response.send_message = AsyncMock()
+        value.followup.send = AsyncMock(return_value=MagicMock())
+        value.edit_original_response = AsyncMock()
+        return value
+
+    async def test_keyword_add_opens_myinstants_search(self) -> None:
+        hits = (
+            InstantHit(
+                "Vine Boom",
+                "https://www.myinstants.com/en/instant/vine/",
+                "https://www.myinstants.com/media/sounds/vine.mp3",
+            ),
+        )
+        actions = _Actions()
+        actions.ui_search_soundboard.return_value = hits
+        modal = AddSoundModal(SoundboardView(actions, 1, 2, ()))
+        modal.name._value = ""
+        modal.url._value = "vine boom"
+        interaction = self._modal_interaction()
+        await modal.on_submit(interaction)
+        actions.ui_search_soundboard.assert_awaited_once_with("vine boom")
+        actions.ui_add_soundboard.assert_not_awaited()
+        view = interaction.followup.send.await_args.kwargs["view"]
+        self.assertIsInstance(view, SoundSearchView)
+
+    async def test_url_add_requires_a_name(self) -> None:
+        actions = _Actions()
+        modal = AddSoundModal(SoundboardView(actions, 1, 2, ()))
+        modal.name._value = ""
+        modal.url._value = "https://www.myinstants.com/en/instant/vine/"
+        interaction = self._modal_interaction()
+        await modal.on_submit(interaction)
+        self.assertIn("tên", interaction.followup.send.await_args.args[0].lower())
+        actions.ui_add_soundboard.assert_not_awaited()
+
+    async def test_search_hit_saves_selected_instant(self) -> None:
+        hits = (InstantHit("Vine", "https://page.test/vine", "https://mp3.test/vine.mp3"),)
+        actions = _Actions()
+        picker = SoundboardView(actions, 1, 2, ())
+        picker.message = None
+        view = SoundSearchView(picker, hits)
+        interaction = self._modal_interaction()
+        await view.select_hit(interaction, 0)
+        actions.ui_add_soundboard.assert_awaited_once_with(
+            interaction, 1, 2, "Vine", "https://mp3.test/vine.mp3",
+        )
+        await view.select_hit(self._modal_interaction(), 0)
+        actions.ui_add_soundboard.assert_awaited_once()
 
 
 if __name__ == "__main__":

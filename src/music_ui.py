@@ -171,11 +171,13 @@ class MusicUIActions(Protocol):
         self, interaction: discord.Interaction, guild_id: int, action: str,
         args: list[str], voice_channel_id: int | None = None,
         *, expected_revision: int | None = None,
+        owner_id: int | None = None,
     ) -> str: ...
 
     async def ui_playlist_search(
         self, interaction: discord.Interaction, guild_id: int, ref: str,
         query: str, voice_channel_id: int | None = None,
+        *, owner_id: int | None = None,
     ) -> tuple[SearchResult, ...]: ...
 
     def ui_tts_available(self) -> bool: ...
@@ -229,6 +231,31 @@ class MusicUIActions(Protocol):
 
     async def ui_toggle_loop(
         self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_previous(
+        self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_shuffle_queue(
+        self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_remove_queued(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        position: int,
+    ) -> str: ...
+
+    async def ui_move_queued(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        position: int,
+        destination: int,
     ) -> str: ...
 
     async def ui_jump(
@@ -356,11 +383,13 @@ def build_music_embed(
     embed.add_field(name="Bài hiện tại", value=current_text, inline=False)
 
     queued = snapshot.queued if snapshot is not None else ()
-    embed.add_field(
-        name="Lặp bài",
-        value="Bật" if snapshot is not None and snapshot.loop_current else "Tắt",
-        inline=True,
-    )
+    if snapshot is not None and snapshot.loop_queue:
+        loop_text = "Hàng đợi"
+    elif snapshot is not None and snapshot.loop_current:
+        loop_text = "Bài"
+    else:
+        loop_text = "Tắt"
+    embed.add_field(name="Lặp", value=loop_text, inline=True)
     embed.add_field(name="Đang chờ", value=str(len(queued)), inline=True)
     if audio_settings is not None:
         embed.add_field(
@@ -769,11 +798,18 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
 
 
 class QueuePaginatorView(_RequesterView):
-    """Static requester-only pages of ten queued tracks."""
+    """Requester-only pages of waiting tracks, with shuffle/remove/move."""
 
-    def __init__(self, requester_id: int, queued: Sequence[object]) -> None:
+    def __init__(
+        self,
+        requester_id: int,
+        queued: Sequence[object],
+        *,
+        panel_view: MusicPanelView | None = None,
+    ) -> None:
         super().__init__(requester_id, timeout=SEARCH_VIEW_TIMEOUT)
         self.queued = tuple(queued)
+        self.panel_view = panel_view
         self.page = 0
         self._sync_buttons()
 
@@ -799,8 +835,26 @@ class QueuePaginatorView(_RequesterView):
     def _sync_buttons(self) -> None:
         self.previous_page.disabled = self.page <= 0
         self.next_page.disabled = self.page >= self.page_count - 1
+        can_edit = self.panel_view is not None and bool(self.queued)
+        self.shuffle_tracks.disabled = not can_edit
+        self.remove_track.disabled = not can_edit
+        self.move_track.disabled = not can_edit
 
-    @discord.ui.button(label="Trước", emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def _refresh_from_snapshot(self, interaction: discord.Interaction) -> None:
+        view = self.panel_view
+        if view is None:
+            return
+        snapshot = view.actions.ui_snapshot(view.guild_id)
+        self.queued = snapshot.queued if snapshot is not None else ()
+        self.page = min(self.page, self.page_count - 1)
+        self._sync_buttons()
+        with contextlib.suppress(discord.HTTPException):
+            await interaction.edit_original_response(
+                embed=self.render_embed(), view=self,
+            )
+        await view.manager.refresh(view.guild_id)
+
+    @discord.ui.button(label="Trước", emoji="◀️", style=discord.ButtonStyle.secondary, row=0)
     async def previous_page(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -808,11 +862,84 @@ class QueuePaginatorView(_RequesterView):
         self._sync_buttons()
         await interaction.response.edit_message(embed=self.render_embed(), view=self)
 
-    @discord.ui.button(label="Sau", emoji="▶️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Sau", emoji="▶️", style=discord.ButtonStyle.secondary, row=0)
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         self.page = min(self.page_count - 1, self.page + 1)
         self._sync_buttons()
         await interaction.response.edit_message(embed=self.render_embed(), view=self)
+
+    @discord.ui.button(label="Xáo trộn", emoji="🔀", style=discord.ButtonStyle.secondary, row=1)
+    async def shuffle_tracks(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        view = self.panel_view
+        if view is None or not await view.ensure_access(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        message = await view.actions.ui_shuffle_queue(
+            interaction, view.guild_id, view.voice_channel_id,
+        )
+        await self._refresh_from_snapshot(interaction)
+        await interaction.followup.send(message, ephemeral=True)
+
+    @discord.ui.button(label="Xóa bài", emoji="🗑️", style=discord.ButtonStyle.danger, row=1)
+    async def remove_track(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.panel_view is None:
+            return
+        await interaction.response.send_modal(QueueEditModal(self, "remove"))
+
+    @discord.ui.button(label="Đổi chỗ", emoji="↕️", style=discord.ButtonStyle.secondary, row=1)
+    async def move_track(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.panel_view is None:
+            return
+        await interaction.response.send_modal(QueueEditModal(self, "move"))
+
+
+class QueueEditModal(discord.ui.Modal):
+    """1-based waiting-track index editor."""
+
+    position = discord.ui.TextInput(label="Số thứ tự bài chờ", max_length=4)
+    destination = discord.ui.TextInput(
+        label="Vị trí mới (chỉ khi đổi chỗ)", required=False, max_length=4,
+    )
+
+    def __init__(self, queue_view: QueuePaginatorView, action: str) -> None:
+        super().__init__(
+            title="Xóa bài chờ" if action == "remove" else "Đổi chỗ bài chờ",
+            timeout=SEARCH_VIEW_TIMEOUT,
+        )
+        self.queue_view = queue_view
+        self.action = action
+        if action == "remove":
+            self.remove_item(self.destination)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        view = self.queue_view.panel_view
+        if view is None or not await view.ensure_access(interaction):
+            return
+        try:
+            position = int(str(self.position).strip())
+            destination = (
+                int(str(self.destination).strip()) if self.action == "move" else 0
+            )
+        except ValueError:
+            await _send_ephemeral(interaction, "Số thứ tự phải là số nguyên.")
+            return
+        await interaction.response.defer(ephemeral=True)
+        if self.action == "remove":
+            message = await view.actions.ui_remove_queued(
+                interaction, view.guild_id, view.voice_channel_id, position,
+            )
+        else:
+            message = await view.actions.ui_move_queued(
+                interaction, view.guild_id, view.voice_channel_id, position, destination,
+            )
+        await self.queue_view._refresh_from_snapshot(interaction)
+        await interaction.followup.send(message, ephemeral=True)
 
 
 class ClearQueueConfirmation(_RequesterView):
@@ -890,12 +1017,20 @@ class MusicPanelView(discord.ui.View):
         # A resolving item is still the current track; let users skip a slow or
         # unavailable extraction without clearing the rest of the queue.
         self.next_track.disabled = not has_current
+        self.previous_track.disabled = not (
+            snapshot is not None and snapshot.can_previous
+        )
+        looping = snapshot is not None and (snapshot.loop_current or snapshot.loop_queue)
         self.loop_track.disabled = not active
         self.loop_track.style = (
-            discord.ButtonStyle.primary
-            if snapshot is not None and snapshot.loop_current
-            else discord.ButtonStyle.secondary
+            discord.ButtonStyle.primary if looping else discord.ButtonStyle.secondary
         )
+        if snapshot is not None and snapshot.loop_queue:
+            self.loop_track.label = "Lặp hàng"
+        elif snapshot is not None and snapshot.loop_current:
+            self.loop_track.label = "Lặp bài"
+        else:
+            self.loop_track.label = "Lặp"
         self.jump_track.disabled = not active
         self.show_queue.disabled = waiting == 0
         self.clear_queue.disabled = waiting == 0
@@ -988,6 +1123,12 @@ class MusicPanelView(discord.ui.View):
         action = "resume" if state is not None and state.state is PlaybackState.PAUSED else "pause"
         await self._run(interaction, action)
 
+    @discord.ui.button(label="Trước", emoji="⏮️", style=discord.ButtonStyle.secondary, row=0)
+    async def previous_track(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._run(interaction, "previous")
+
     @discord.ui.button(label="Bài tiếp", emoji="⏭️", style=discord.ButtonStyle.secondary, row=0)
     async def next_track(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         await self._run(interaction, "skip")
@@ -1008,7 +1149,9 @@ class MusicPanelView(discord.ui.View):
             return
         snapshot = self.actions.ui_snapshot(self.guild_id)
         queued = snapshot.queued if snapshot is not None else ()
-        view = QueuePaginatorView(interaction.user.id, queued)
+        view = QueuePaginatorView(
+            interaction.user.id, queued, panel_view=self,
+        )
         message = await _send_ephemeral(
             interaction,
             "Hàng đợi hiện tại:",
@@ -1526,6 +1669,24 @@ class MusicPanelManager:
         async with lock:
             record = self.registry.get(guild_id)
             if record is None or record.voice_channel_id == voice_channel_id:
+                return False
+            self.registry.pop_if(guild_id, record)
+            self._cancel_bump(guild_id)
+            await self._disable_record(record)
+            return True
+
+    async def drop_if_channel(self, guild_id: int, channel_id: int) -> bool:
+        """Forget a panel bound to a deleted voice room or destination channel."""
+        lock = self._post_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            record = self.registry.get(guild_id)
+            if record is None:
+                return False
+            destination_id = getattr(record.destination, "id", None)
+            if (
+                record.voice_channel_id != channel_id
+                and destination_id != channel_id
+            ):
                 return False
             self.registry.pop_if(guild_id, record)
             self._cancel_bump(guild_id)

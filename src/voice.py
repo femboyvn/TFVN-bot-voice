@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -25,6 +26,42 @@ def member_voice_channel(member: object) -> object | None:
     return getattr(voice_state, "channel", None)
 
 
+def guild_channel_exists(guild: object, channel_id: object) -> bool:
+    """Return False only when the guild cache explicitly lacks *channel_id*."""
+    get_channel = getattr(guild, "get_channel", None)
+    if not callable(get_channel) or inspect.iscoroutinefunction(get_channel):
+        return True
+    return get_channel(channel_id) is not None
+
+
+def voice_client_is_live(guild: object, voice_client: object | None) -> bool:
+    """Return True when *voice_client* is connected to a channel still on *guild*.
+
+    A client can remain on ``guild.voice_client`` after Discord already dropped
+    it, including when a temporary voice channel is deleted. Those leftovers
+    must not count as an occupied room.
+    """
+    if voice_client is None:
+        return False
+    is_connected = getattr(voice_client, "is_connected", None)
+    if not callable(is_connected) or not is_connected():
+        return False
+    channel = getattr(voice_client, "channel", None)
+    channel_id = getattr(channel, "id", None)
+    if channel is None or channel_id is None:
+        return False
+    return guild_channel_exists(guild, channel_id)
+
+
+def live_voice_channel_id(guild: object) -> int | None:
+    """Return the live connected voice channel id, or None if the client is stale."""
+    voice_client = getattr(guild, "voice_client", None)
+    if not voice_client_is_live(guild, voice_client):
+        return None
+    channel_id = getattr(getattr(voice_client, "channel", None), "id", None)
+    return channel_id if isinstance(channel_id, int) else None
+
+
 def same_voice_channel_error(
     guild: discord.Guild,
     member: object,
@@ -42,7 +79,7 @@ def same_voice_channel_error(
         return "Bạn phải ở đúng kênh thoại của bảng điều khiển này."
 
     voice_client = guild.voice_client
-    if not voice_client or not voice_client.is_connected():
+    if not voice_client_is_live(guild, voice_client):
         if allow_disconnected and expected_channel_id is not None:
             return None
         return "Bot chưa kết nối kênh thoại."
@@ -111,8 +148,28 @@ async def _connect_member_voice_client_locked(
             "Bạn phải ở đúng kênh thoại của bảng điều khiển này."
         )
 
+    return await _connect_channel_locked(guild, target_channel, settings)
+
+
+async def connect_voice_channel(
+    guild: discord.Guild,
+    channel: object,
+    settings: Settings,
+) -> discord.VoiceClient:
+    """Connect to *channel* without moving an occupied voice client."""
+    lock = _VOICE_CONNECT_LOCKS.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        return await _connect_channel_locked(guild, channel, settings)
+
+
+async def _connect_channel_locked(
+    guild: discord.Guild,
+    target_channel: object,
+    settings: Settings,
+) -> discord.VoiceClient:
+    target_channel_id = getattr(target_channel, "id", None)
     voice_client = guild.voice_client
-    if voice_client and voice_client.is_connected():
+    if voice_client_is_live(guild, voice_client):
         connected_channel = voice_client.channel
         if (
             connected_channel is None
@@ -126,10 +183,14 @@ async def _connect_member_voice_client_locked(
     if voice_client:
         await voice_client.disconnect(force=True)
 
+    connect = getattr(target_channel, "connect", None)
+    if not callable(connect):
+        raise VoiceAccessError("Không thể kết nối kênh thoại này.")
+
     last_error: Exception | None = None
     for attempt in range(1, settings.voice_connect_retries + 1):
         try:
-            return await target_channel.connect(
+            return await connect(
                 timeout=settings.voice_connect_timeout,
                 reconnect=False,
             )

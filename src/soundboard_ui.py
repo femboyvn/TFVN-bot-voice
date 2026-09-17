@@ -11,10 +11,11 @@ import contextlib
 import logging
 from collections.abc import Sequence
 from typing import Protocol
+from urllib.parse import urlparse
 
 import discord
 
-from .soundboard import SoundboardEntry, format_clip_duration
+from .soundboard import InstantHit, SoundboardEntry, SoundboardError, format_clip_duration
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,11 @@ class SoundboardActions(Protocol):
         url: str,
     ) -> str: ...
 
+    async def ui_search_soundboard(
+        self,
+        query: str,
+    ) -> tuple[InstantHit, ...]: ...
+
     async def ui_remove_soundboard(
         self,
         interaction: discord.Interaction,
@@ -88,7 +94,7 @@ def build_soundboard_embed(
     """Public/ephemeral catalog card for the soundboard picker."""
     if not entries:
         description = (
-            "Chưa có âm thanh. Bấm **Thêm** và dán URL MyInstants hoặc YouTube."
+            "Chưa có âm thanh. Bấm **Thêm** rồi dán URL hoặc từ khóa MyInstants."
         )
     else:
         start = page * SOUNDBOARD_PAGE_SIZE
@@ -140,15 +146,14 @@ class SoundboardSelect(discord.ui.Select["SoundboardView"]):
 
 class AddSoundModal(discord.ui.Modal, title="Thêm âm thanh"):
     name = discord.ui.TextInput(
-        label="Tên",
-        placeholder="Ví dụ: bruh",
-        required=True,
-        min_length=2,
+        label="Tên (bắt buộc nếu dán URL)",
+        placeholder="Ví dụ: bruh — để trống khi tìm MyInstants",
+        required=False,
         max_length=32,
     )
     url = discord.ui.TextInput(
-        label="URL",
-        placeholder="MyInstants, YouTube, hoặc tệp mp3…",
+        label="URL hoặc từ khóa MyInstants",
+        placeholder="https://… hoặc vine boom",
         required=True,
         max_length=500,
     )
@@ -161,13 +166,44 @@ class AddSoundModal(discord.ui.Modal, title="Thêm âm thanh"):
         picker = self.picker
         if not await picker.ensure_access(interaction):
             return
+        query = str(self.url).strip()
+        name = str(self.name).strip()
         await interaction.response.defer(ephemeral=True, thinking=True)
+        parsed = urlparse(query)
+        is_url = parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+        if not is_url:
+            try:
+                hits = await picker.actions.ui_search_soundboard(query)
+            except Exception as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            if not hits:
+                await interaction.followup.send(
+                    "Không tìm thấy âm thanh MyInstants.", ephemeral=True,
+                )
+                return
+            view = SoundSearchView(picker, hits)
+            message = await interaction.followup.send(
+                "Chọn nút số tương ứng để lưu vào bảng âm thanh:",
+                view=view,
+                embed=view.render_embed(),
+                ephemeral=True,
+                wait=True,
+            )
+            view.message = message
+            return
+        if len(name) < 2:
+            await interaction.followup.send(
+                "Hãy nhập tên (2–32 ký tự) khi thêm bằng URL.",
+                ephemeral=True,
+            )
+            return
         message = await picker.actions.ui_add_soundboard(
             interaction,
             picker.guild_id,
             picker.voice_channel_id,
-            str(self.name),
-            str(self.url),
+            name,
+            query,
         )
         await picker.reload()
         if picker.message is not None:
@@ -175,6 +211,85 @@ class AddSoundModal(discord.ui.Modal, title="Thêm âm thanh"):
                 await picker.message.edit(
                     embed=picker.render_embed(),
                     view=picker,
+                )
+        await interaction.followup.send(message, ephemeral=True)
+
+
+class SoundSearchButton(discord.ui.Button["SoundSearchView"]):
+    def __init__(self, index: int) -> None:
+        super().__init__(
+            label=str(index + 1),
+            style=discord.ButtonStyle.primary,
+            row=0,
+        )
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view = self.view
+        if not isinstance(view, SoundSearchView):
+            await _send_ephemeral(interaction, "Kết quả đã hết hạn.")
+            return
+        await view.select_hit(interaction, self.index)
+
+
+class SoundSearchView(discord.ui.View):
+    """Numbered MyInstants hits mapped onto the parent soundboard picker."""
+
+    def __init__(self, picker: SoundboardView, hits: Sequence[InstantHit]) -> None:
+        super().__init__(timeout=SOUNDBOARD_VIEW_TIMEOUT)
+        self.picker = picker
+        self.hits = tuple(hits[:5])
+        self.message: object | None = None
+        self._lock = asyncio.Lock()
+        self._consumed = False
+        for index in range(len(self.hits)):
+            self.add_item(SoundSearchButton(index))
+
+    def render_embed(self) -> discord.Embed:
+        lines = []
+        for index, hit in enumerate(self.hits, 1):
+            title = discord.utils.escape_markdown(hit.name)
+            lines.append(f"{index}. {title}")
+        return discord.Embed(
+            title="Kết quả MyInstants",
+            description="\n".join(lines) or "Không có kết quả.",
+            color=discord.Color.blurple(),
+        )
+
+    async def select_hit(self, interaction: discord.Interaction, index: int) -> None:
+        if not await self.picker.ensure_access(interaction):
+            return
+        async with self._lock:
+            if self._consumed:
+                await _send_ephemeral(interaction, "Kết quả này đã được sử dụng.")
+                return
+            self._consumed = True
+        try:
+            hit = self.hits[index]
+        except IndexError:
+            await _send_ephemeral(interaction, "Kết quả không còn hợp lệ.")
+            return
+        self.stop()
+        _disable(self)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            message = await self.picker.actions.ui_add_soundboard(
+                interaction,
+                self.picker.guild_id,
+                self.picker.voice_channel_id,
+                hit.name[:32],
+                hit.mp3_url or hit.page_url,
+            )
+        except SoundboardError as exc:
+            message = str(exc)
+        with contextlib.suppress(discord.HTTPException):
+            await interaction.edit_original_response(view=self)
+        await self.picker.reload()
+        if self.picker.message is not None:
+            with contextlib.suppress(discord.HTTPException, AttributeError):
+                await self.picker.message.edit(
+                    embed=self.picker.render_embed(),
+                    view=self.picker,
                 )
         await interaction.followup.send(message, ephemeral=True)
 

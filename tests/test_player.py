@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import tempfile
 import unittest
+from collections import deque
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -17,9 +18,11 @@ from src.player import (
     GuildAudioSettings,
     GuildPlayer,
     JumpResult,
+    LoopMode,
     PlaybackState,
     PlayerManager,
     PlayerSnapshot,
+    _QueuedEntry,
 )
 from src.tts import TTSError, TextToSpeech, now_playing_speech
 
@@ -43,6 +46,7 @@ class GuildPlayerControlTests(unittest.TestCase):
     def setUp(self) -> None:
         self.player = object.__new__(GuildPlayer)
         self.player.loop_current = False
+        self.player.loop_queue = False
         self.player.guild = Mock()
         self.player.current = None
         self.player._closed = False
@@ -52,10 +56,26 @@ class GuildPlayerControlTests(unittest.TestCase):
         self.player._skip_requested = False
         self.player._resolved_track = None
         self.player._state = PlaybackState.IDLE
+        self.player._waiting = deque()
+        self.player._history = deque()
+        self.player._omit_history = False
+        self.player._vote_key = None
+        self.player._vote_skippers = set()
+        self.player._current_entry = None
+        self.player._activity_version = 0
+        self.player._queue_ready = Mock()
+        self.player._queue_ready.set = Mock()
 
-    def test_toggle_loop_changes_state(self) -> None:
-        self.assertTrue(self.player.toggle_loop())
-        self.assertFalse(self.player.toggle_loop())
+    def test_toggle_loop_cycles_track_then_queue_then_off(self) -> None:
+        self.assertIs(self.player.toggle_loop(), LoopMode.TRACK)
+        self.assertTrue(self.player.loop_current)
+        self.assertFalse(self.player.loop_queue)
+        self.assertIs(self.player.toggle_loop(), LoopMode.QUEUE)
+        self.assertFalse(self.player.loop_current)
+        self.assertTrue(self.player.loop_queue)
+        self.assertIs(self.player.toggle_loop(), LoopMode.OFF)
+        self.assertFalse(self.player.loop_current)
+        self.assertFalse(self.player.loop_queue)
 
     def test_skip_stops_active_voice_client_and_disables_loop(self) -> None:
         voice_client = Mock()
@@ -77,6 +97,64 @@ class GuildPlayerControlTests(unittest.TestCase):
 
         self.assertFalse(self.player.skip())
         voice_client.stop.assert_not_called()
+
+    def test_shuffle_remove_and_move_waiting_tracks(self) -> None:
+        channel = Mock()
+        tracks = [
+            _QueuedEntry(QueuedTrack(f"Bài {index}", f"https://youtu.be/{index}", 1), channel)
+            for index in range(1, 4)
+        ]
+        self.player._waiting.extend(tracks)
+        self.assertEqual(self.player.remove_queued(2).title, "Bài 2")
+        self.assertEqual(
+            tuple(entry.metadata.title for entry in self.player._waiting),
+            ("Bài 1", "Bài 3"),
+        )
+        self.assertTrue(self.player.move_queued(2, 1))
+        self.assertEqual(
+            tuple(entry.metadata.title for entry in self.player._waiting),
+            ("Bài 3", "Bài 1"),
+        )
+        self.assertEqual(self.player.shuffle_queue(), 2)
+        self.assertEqual(len(self.player._waiting), 2)
+        self.assertIsNone(self.player.remove_queued(9))
+        self.assertFalse(self.player.move_queued(1, 9))
+
+    def test_previous_requeues_current_and_skips(self) -> None:
+        channel = Mock()
+        previous = _QueuedEntry(QueuedTrack("Cũ", "https://youtu.be/old", 1), channel)
+        current = _QueuedEntry(QueuedTrack("Mới", "https://youtu.be/new", 1), channel)
+        self.player._history.append(previous)
+        self.player._current_entry = current
+        self.player.current = current.metadata
+        self.player._music_active = True
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        self.assertTrue(self.player.previous())
+        self.assertTrue(self.player._omit_history)
+        self.assertTrue(self.player._skip_requested)
+        self.assertEqual(
+            tuple(entry.metadata.title for entry in self.player._waiting),
+            ("Cũ", "Mới"),
+        )
+        self.assertEqual(len(self.player._history), 0)
+
+    def test_vote_skip_majority_skips(self) -> None:
+        self.player.current = QueuedTrack("A", "https://youtu.be/a", 1)
+        self.player._music_active = True
+        voice_client = Mock()
+        voice_client.is_playing.return_value = True
+        voice_client.is_paused.return_value = False
+        self.player.guild.voice_client = voice_client
+        status, votes, needed = self.player.vote_skip(1, voter_count=3)
+        self.assertEqual((status, votes, needed), ("voted", 1, 2))
+        status, votes, needed = self.player.vote_skip(1, voter_count=3)
+        self.assertEqual(status, "already")
+        status, votes, needed = self.player.vote_skip(2, voter_count=3)
+        self.assertEqual(status, "skipped")
+        self.assertTrue(self.player._skip_requested)
 
     def test_jump_stops_current_track_and_records_offset(self) -> None:
         voice_client = Mock()
@@ -347,7 +425,7 @@ class GuildPlayerJumpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1.0,
             )
             self.assertEqual(player.current.title, first.title)
-            self.assertEqual(player._queue.qsize(), 1)
+            self.assertEqual(len(player._waiting), 1)
             self.assertEqual(
                 media.create_audio_source.call_args_list[:2],
                 [
@@ -671,6 +749,32 @@ class GuildPlayerQueueTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertEqual(player.current, queued)
+        finally:
+            await player.close(disconnect=False)
+
+    async def test_queue_loop_requeues_finished_track_behind_waiting(self) -> None:
+        media = Mock()
+        media.resolve_queued = AsyncMock(side_effect=lambda item: Track(
+            item.title, f"https://stream.test/{item.title}", 10,
+        ))
+        media.create_audio_source.side_effect = lambda *_args, **_kwargs: _FakeAudioSource()
+        player, _, voice_client, _ = self._make_player(media=media)
+        channel = AsyncMock()
+        first = QueuedTrack("A", "https://youtube.test/a", 10)
+        second = QueuedTrack("B", "https://youtube.test/b", 10)
+        try:
+            await player.enqueue_many((first, second), channel)
+            await asyncio.wait_for(voice_client.play_notifications.get(), timeout=1.0)
+            self.assertIs(player.toggle_loop(), LoopMode.TRACK)
+            self.assertIs(player.toggle_loop(), LoopMode.QUEUE)
+            voice_client.finish_current()
+            await asyncio.wait_for(voice_client.play_notifications.get(), timeout=1.0)
+            self.assertEqual(player.current, second)
+            self.assertEqual(player.snapshot().queued, (first,))
+            voice_client.finish_current()
+            await asyncio.wait_for(voice_client.play_notifications.get(), timeout=1.0)
+            self.assertEqual(player.current, first)
+            self.assertEqual(player.snapshot().queued, (second,))
         finally:
             await player.close(disconnect=False)
 

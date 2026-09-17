@@ -32,8 +32,8 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "Vào kênh thoại, gửi bảng nhạc, và mở bảng âm thanh tùy chỉnh.",
     ),
     "playlist": (
-        "[list | show | create | add | save | play | rename | remove | move | delete]",
-        "Tạo, sửa, lưu hàng đợi và phát danh sách cá nhân trong máy chủ.",
+        "[server] [list | show | create | add | save | play | rename | remove | move | delete]",
+        "Tạo, sửa, lưu hàng đợi và phát danh sách cá nhân hoặc chung của máy chủ.",
     ),
     "join": (
         "",
@@ -69,11 +69,11 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
     ),
     "skip": (
         "",
-        "Bỏ qua bài đang phát.",
+        "Bỏ phiếu bỏ qua bài đang phát; đủ nửa phòng thì cắt.",
     ),
     "loop": (
         "",
-        "Bật hoặc tắt lặp bài hiện tại.",
+        "Chuyển lặp: tắt → bài hiện tại → cả hàng đợi.",
     ),
     "stop": (
         "",
@@ -167,7 +167,7 @@ def _build_overview(prefix: str) -> discord.Embed:
         "**Bắt đầu nhanh**\n"
         f"1. Vào một kênh thoại.\n"
         f"2. Gõ {music} để bot vào phòng và gửi **bảng điều khiển nhạc**.\n"
-        "3. Bấm **Thêm nhạc** để tìm bài, dán URL YouTube/Spotify, hoặc playlist.\n\n"
+        "3. Bấm **Tìm bài** để tìm bài, dán URL YouTube/Spotify, hoặc playlist.\n\n"
         "Chỉ thành viên trong **đúng kênh thoại** của bot mới dùng được nút "
         "và lệnh điều khiển — kể cả quản trị viên cũng phải vào cùng phòng.\n\n"
         f"Chọn chủ đề bên dưới, hoặc dùng {help_cmd} để xem một lệnh cụ thể.",
@@ -184,11 +184,12 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Thêm và phát",
         value=(
-            "**Thêm nhạc** — tên bài, URL YouTube hoặc Spotify, playlist YouTube/Spotify. "
+            "**Tìm bài** — tên bài, URL YouTube hoặc Spotify, playlist YouTube/Spotify. "
             "Tìm kiếm hiện tối đa 5 kết quả riêng; playlist thêm tối đa 25 bài mỗi lần.\n"
             "**Tạm dừng / Tiếp tục** — dừng hoặc phát tiếp bài hiện tại.\n"
-            "**Bài tiếp** — bỏ qua bài đang phát, kể cả khi bài đang tải.\n"
-            "**Lặp** — bật hoặc tắt lặp bài hiện tại.\n"
+            "**Trước** — phát lại bài vừa xong; bài hiện tại được đưa lên đầu hàng đợi.\n"
+            "**Bài tiếp** — bỏ phiếu bỏ qua bài đang phát (đủ nửa phòng thì cắt).\n"
+            "**Lặp** — tắt → lặp bài → lặp cả hàng đợi.\n"
             "**Tua đến** — nhảy tới mốc `HH:MM:SS`."
         ),
         inline=False,
@@ -196,7 +197,7 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Hàng đợi",
         value=(
-            "**Hàng đợi** — danh sách chờ, 10 bài mỗi trang.\n"
+            "**Hàng đợi** — danh sách chờ, 10 bài mỗi trang; xáo trộn, xóa một bài, đổi chỗ.\n"
             "**Xóa hàng đợi** — xóa bài đang chờ; bài hiện tại vẫn phát. Có bước xác nhận.\n"
             "**Dừng** — dừng bài hiện tại và xóa hàng đợi. Bot ở lại kênh; "
             "phiên đọc chat không bị tắt."
@@ -206,10 +207,9 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Danh sách phát",
         value=(
-            "**My Playlist** — thư viện riêng của bạn trong máy chủ. "
-            "Tạo, tìm và thêm bài, đổi thứ tự, xóa bài, hoặc lưu bài hiện tại "
-            "cùng hàng đợi. **Phát** thêm vào cuối hàng đợi. "
-            "Danh sách vẫn còn sau khi bot khởi động lại."
+            "**My Playlist** — thư viện riêng của bạn, hoặc bấm **Máy chủ** để "
+            "xem danh sách chung. Tạo/xóa danh sách chung cần quyền Quản lý máy chủ. "
+            "**Phát** thêm vào cuối hàng đợi. Danh sách vẫn còn sau khi bot khởi động lại."
         ),
         inline=False,
     )
@@ -219,7 +219,7 @@ def _build_panel(prefix: str) -> discord.Embed:
             "**Đọc tên bài** — đọc to tiêu đề khi bài mới bắt đầu. "
             "Dòng chữ **Đang phát** vẫn được gửi khi tắt đọc.\n"
             "**Đọc tin nhắn** — đọc chat văn bản của kênh thoại.\n"
-            "**Bảng âm thanh** — thêm URL MyInstants/YouTube, phát clip đè lên nhạc.\n"
+            "**Bảng âm thanh** — thêm URL hoặc tìm MyInstants, phát clip đè lên nhạc.\n"
             "**Cài đặt** — âm lượng nhạc, mức nhạc khi TTS, ngôn ngữ TTS, "
             "đọc tên người gửi, và tự đưa bảng lên.\n"
             "**Rời** — dừng nhạc, tắt đọc chat, và rời kênh thoại.\n"
@@ -276,7 +276,7 @@ def _build_commands(prefix: str) -> discord.Embed:
         inline=False,
     )
     embed.add_field(
-        name="Danh sách cá nhân",
+        name="Danh sách phát",
         value=_command_lines(prefix, ("playlist",)),
         inline=False,
     )
@@ -381,18 +381,22 @@ _COMMAND_DETAILS: dict[str, str] = {
         '`playlist remove "Nhạc tối" 2` — xóa bài số 2.\n'
         '`playlist move "Nhạc tối" 3 1` — chuyển bài 3 lên vị trí 1.\n'
         '`playlist delete "Nhạc tối"` — xóa danh sách.\n'
+        '`playlist server list` — danh sách chung của máy chủ; '
+        "tạo/xóa chung cần quyền Quản lý máy chủ.\n"
         "Thêm tiền tố bot trước các ví dụ. Chỉ chủ danh sách truy cập được; "
         "phát và lưu hàng đợi yêu cầu ở cùng phòng thoại với bot. "
         "Mỗi lần nhập URL playlist ngoài xét tối đa 25 bài."
     ),
     "music": (
         "Chỉ có một bảng hoạt động trên mỗi máy chủ. Mở bảng mới sẽ tắt bảng cũ. "
-        "Sau khi bot khởi động lại, chạy lại lệnh này."
+        "Sau khi bot khởi động lại, bảng và hàng đợi được khôi phục nếu còn người "
+        "trong phòng thoại."
     ),
     "soundboard": (
         "Thư viện clip theo từng máy chủ, lưu trên đĩa (tối đa 12 giây, 40 clip). "
         "Phát đè lên nhạc đang chạy, không dừng hàng đợi. "
-        "Dán URL MyInstants, YouTube, hoặc tệp âm thanh. Không dùng được playlist."
+        "Dán URL MyInstants, YouTube, tệp âm thanh, hoặc từ khóa MyInstants. "
+        "Không dùng được playlist."
     ),
     "join": (
         "Gõ tin trong **chat của kênh thoại** để bot đọc. "
@@ -413,7 +417,12 @@ _COMMAND_DETAILS: dict[str, str] = {
     "stop": (
         "Không rời kênh thoại. Nếu phiên đọc chat đang chạy, bot vẫn đọc tin nhắn."
     ),
-    "search": "Kết quả là liên kết. Dùng play, next, hoặc **Thêm nhạc** để xếp hàng.",
+    "skip": (
+        "Mỗi người trong phòng thoại bỏ một phiếu. Đủ nửa số người thật thì cắt bài. "
+        "Bấm lại khi đã bỏ phiếu chỉ hiện số phiếu hiện tại."
+    ),
+    "loop": "Tắt → lặp bài hiện tại → lặp cả hàng đợi → tắt.",
+    "search": "Kết quả là liên kết. Dùng play, next, hoặc **Tìm bài** để xếp hàng.",
 }
 
 

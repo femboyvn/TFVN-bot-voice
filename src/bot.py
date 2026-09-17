@@ -62,6 +62,7 @@ class VoiceBot(commands.Bot):
             Path(settings.playlist_db_path),
             max_per_user=settings.playlist_max_per_user,
             max_tracks=settings.playlist_max_tracks,
+            max_per_server=settings.playlist_max_server,
         )
         self.playlist_backups = (
             PlaylistBackups(
@@ -88,6 +89,13 @@ class VoiceBot(commands.Bot):
             self.playlist_backups.start()
 
     async def on_ready(self) -> None:
+        if not getattr(self, "_slash_synced", False):
+            self._slash_synced = True
+            try:
+                synced = await self.tree.sync()
+                log.info("Synced %s application commands", len(synced))
+            except Exception:
+                log.exception("Could not sync application commands")
         log.info("Bot ready as %s (guilds: %s)", self.user, len(self.guilds))
 
     async def close(self) -> None:
