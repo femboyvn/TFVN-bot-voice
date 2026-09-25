@@ -12,6 +12,7 @@ from src.session import (
     VoiceSession,
     chunk_speech_text,
     is_session_chat_message,
+    join_announcement_name,
     prepare_chat_speech,
     sanitize_for_speech,
 )
@@ -46,6 +47,68 @@ class ChatFilterTests(unittest.TestCase):
         self.assertFalse(is_session_chat_message(**{**base, "content": "   "}))
         self.assertFalse(
             is_session_chat_message(**{**base, "content": "!tfd leave"})
+        )
+
+
+class JoinAnnouncementTests(unittest.TestCase):
+    def test_join_announces_only_the_display_name(self) -> None:
+        self.assertEqual(
+            join_announcement_name(
+                member_is_bot=False,
+                before_channel_id=None,
+                after_channel_id=7,
+                bot_channel_id=7,
+                display_name="Lan",
+            ),
+            "Lan",
+        )
+
+    def test_move_into_bot_room_announces_only_the_name(self) -> None:
+        self.assertEqual(
+            join_announcement_name(
+                member_is_bot=False,
+                before_channel_id=3,
+                after_channel_id=7,
+                bot_channel_id=7,
+                display_name="Minh",
+            ),
+            "Minh",
+        )
+
+    def test_leave_mute_other_room_and_bots_stay_silent(self) -> None:
+        silent = dict(
+            member_is_bot=False,
+            before_channel_id=7,
+            after_channel_id=None,
+            bot_channel_id=7,
+            display_name="Lan",
+        )
+        self.assertIsNone(join_announcement_name(**silent))
+        self.assertIsNone(
+            join_announcement_name(**{**silent, "after_channel_id": 7})
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{**silent, "before_channel_id": None, "after_channel_id": 4}
+            )
+        )
+        self.assertIsNone(
+            join_announcement_name(**{**silent, "member_is_bot": True, "after_channel_id": 7, "before_channel_id": None})
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{
+                    **silent,
+                    "before_channel_id": None,
+                    "after_channel_id": 7,
+                    "display_name": "🎉",
+                }
+            )
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{**silent, "before_channel_id": None, "bot_channel_id": None}
+            )
         )
 
 

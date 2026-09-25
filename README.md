@@ -218,6 +218,8 @@ normal rebuilds; `docker compose down -v` deletes named volumes and their data.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
 3. Type in that **voice channel's text chat** — the bot speaks the message body
    (name prefix is off by default).
+   While the bot is in a voice channel, it also speaks **only the display name**
+   of each person who joins that channel. Leaving, muting, and deafening stay silent.
 4. `!tfd nameannounce on` or **Cài đặt → Đọc tên người gửi: on** speaks
    `"{display name} nói {message}"`; `off` reads only the message body. The choice
    is kept for later chat-reading sessions until the bot process restarts.

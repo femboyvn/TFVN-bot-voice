@@ -467,6 +467,66 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.cog.music_ui.refresh.assert_awaited_once_with(1)
         self.cog.music_ui.drop_if_channel.assert_not_awaited()
 
+    async def test_human_join_schedules_only_the_display_name(self) -> None:
+        self.bot.user = Mock(id=55)
+        self.cog._schedule_join_announcement = Mock()
+        member = Mock()
+        member.id = 9
+        member.bot = False
+        member.display_name = "Lan"
+        member.guild = self.ctx.guild
+        before = Mock()
+        before.channel = None
+        after = Mock()
+        after.channel = Mock(id=7)
+
+        await self.cog.on_voice_state_update(member, before, after)
+
+        self.cog._schedule_join_announcement.assert_called_once_with(1, 7, "Lan")
+        self.sessions.stop.assert_not_called()
+
+    async def test_human_leave_does_not_announce_a_name(self) -> None:
+        self.bot.user = Mock(id=55)
+        self.cog._schedule_join_announcement = Mock()
+        member = Mock()
+        member.id = 9
+        member.bot = False
+        member.display_name = "Lan"
+        member.guild = self.ctx.guild
+        before = Mock()
+        before.channel = Mock(id=7)
+        after = Mock()
+        after.channel = None
+
+        await self.cog.on_voice_state_update(member, before, after)
+
+        self.cog._schedule_join_announcement.assert_not_called()
+
+    async def test_announce_join_name_uses_the_session_queue_when_active(self) -> None:
+        session = Mock()
+        session.active = True
+        session.voice_channel_id = 7
+        session.enqueue_speech = Mock(return_value=True)
+        self.sessions.get.return_value = session
+        self.bot.get_guild.return_value = self.ctx.guild
+        self.players.get.return_value = Mock()
+
+        await self.cog._announce_join_name(1, 7, "Lan")
+
+        session.enqueue_speech.assert_called_once_with("Lan")
+        self.players.get.return_value.speak_over_music.assert_not_called()
+
+    async def test_announce_join_name_ducks_music_without_a_session(self) -> None:
+        self.sessions.get.return_value = None
+        player = Mock()
+        player.speak_over_music = AsyncMock(return_value=True)
+        self.players.get.return_value = player
+        self.bot.get_guild.return_value = self.ctx.guild
+
+        await self.cog._announce_join_name(1, 7, "Lan")
+
+        player.speak_over_music.assert_awaited_once_with("Lan")
+
     async def test_deleted_bound_voice_channel_drops_panel_and_session(self) -> None:
         channel = MagicMock(spec=discord.VoiceChannel)
         channel.id = 7

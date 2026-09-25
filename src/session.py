@@ -109,6 +109,30 @@ def sanitize_for_speech(content: str) -> str:
     return text
 
 
+def join_announcement_name(
+    *,
+    member_is_bot: bool,
+    before_channel_id: int | None,
+    after_channel_id: int | None,
+    bot_channel_id: int | None,
+    display_name: str,
+) -> str | None:
+    """Return only a joiner's name, or None when this update is not a join.
+
+    A join is entering the bot's current voice channel from outside it.
+    The spoken text is the display name alone. Leaving, muting, deafening,
+    and staying in the same channel produce no announcement.
+    """
+    if member_is_bot or bot_channel_id is None:
+        return None
+    if after_channel_id != bot_channel_id or before_channel_id == bot_channel_id:
+        return None
+    name = sanitize_for_speech(display_name)
+    if not name:
+        return None
+    return name
+
+
 def prepare_chat_speech(
     content: str,
     *,

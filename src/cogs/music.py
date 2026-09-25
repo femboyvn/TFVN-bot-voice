@@ -52,7 +52,7 @@ from ..playlists import (
     PlaylistStore,
     SavedPlaylist,
 )
-from ..session import SessionManager
+from ..session import SessionManager, join_announcement_name
 from ..soundboard import (
     InstantHit,
     SoundboardEntry,
@@ -62,6 +62,7 @@ from ..soundboard import (
 )
 from ..soundboard_ui import SoundboardView
 from ..spotify import is_spotify_input
+from ..tts import play_tts_on_voice_client
 from ..voice import (
     VoiceAccessError,
     VoiceConnectionFailed,
@@ -111,6 +112,7 @@ class MusicCog(commands.Cog, name="Music"):
             command_prefix=settings.command_prefix,
         )
         self._operation_locks: dict[int, asyncio.Lock] = {}
+        self._join_announce_tasks: set[asyncio.Task[None]] = set()
         self._restored = False
         self._restoring = False
         self.players.add_state_listener(self.music_ui.on_player_state_change)
@@ -753,7 +755,8 @@ class MusicCog(commands.Cog, name="Music"):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """Release a vanished voice room so the bot can join a new channel."""
+        """Release a vanished voice room and speak the name of a human who joins."""
+        self._note_member_join(member, before, after)
         bot_user = self.bot.user
         if bot_user is None or getattr(member, "id", None) != bot_user.id:
             return
@@ -1903,7 +1906,97 @@ class MusicCog(commands.Cog, name="Music"):
     async def close(self) -> None:
         self.players.remove_state_listener(self.music_ui.on_player_state_change)
         self.players.remove_state_listener(self._persist_playback_state)
+        announce_tasks = tuple(self._join_announce_tasks)
+        for task in announce_tasks:
+            task.cancel()
+        if announce_tasks:
+            await asyncio.gather(*announce_tasks, return_exceptions=True)
         await self.music_ui.close()
+
+    def _note_member_join(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Queue a name-only announcement when a human enters the bot's room."""
+        if not self.settings.tts_enabled:
+            return
+        bot_user = self.bot.user
+        bot_id = getattr(bot_user, "id", None)
+        if bot_id is not None and getattr(member, "id", None) == bot_id:
+            return
+        if getattr(member, "bot", False) is True:
+            return
+        guild = getattr(member, "guild", None)
+        if guild is None:
+            return
+        before_id = getattr(getattr(before, "channel", None), "id", None)
+        after_id = getattr(getattr(after, "channel", None), "id", None)
+        name = join_announcement_name(
+            member_is_bot=False,
+            before_channel_id=before_id if isinstance(before_id, int) else None,
+            after_channel_id=after_id if isinstance(after_id, int) else None,
+            bot_channel_id=live_voice_channel_id(guild),
+            display_name=str(getattr(member, "display_name", "") or ""),
+        )
+        if name is None or not isinstance(after_id, int):
+            return
+        self._schedule_join_announcement(guild.id, after_id, name)
+
+    def _schedule_join_announcement(
+        self,
+        guild_id: int,
+        channel_id: int,
+        name: str,
+    ) -> None:
+        task = asyncio.create_task(
+            self._announce_join_name(guild_id, channel_id, name),
+            name=f"join-announce-{guild_id}",
+        )
+        self._join_announce_tasks.add(task)
+        task.add_done_callback(self._join_announce_tasks.discard)
+
+    async def _announce_join_name(
+        self,
+        guild_id: int,
+        channel_id: int,
+        name: str,
+    ) -> None:
+        """Speak *name* and nothing else for a member who just joined."""
+        if not self.settings.tts_enabled:
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None or live_voice_channel_id(guild) != channel_id:
+            return
+        session = self.sessions.get(guild_id)
+        if (
+            session is not None
+            and session.active
+            and session.voice_channel_id == channel_id
+        ):
+            session.enqueue_speech(name)
+            return
+        player = self.players.get(guild_id)
+        if player is not None and await player.speak_over_music(name):
+            return
+        voice_client = guild.voice_client
+        tts = self.players.tts_for_guild(guild_id)
+        if (
+            voice_client is None
+            or tts is None
+            or not voice_client.is_connected()
+            or live_voice_channel_id(guild) != channel_id
+        ):
+            return
+        await play_tts_on_voice_client(
+            self.bot,
+            voice_client,
+            tts,
+            name,
+            volume=self.settings.default_volume,
+            skip_if_busy=True,
+        )
 
     def _voice_client_channel_missing(self, guild: discord.Guild) -> bool:
         return voice_channel_missing(guild, guild.voice_client)

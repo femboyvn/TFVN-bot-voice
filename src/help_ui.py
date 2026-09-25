@@ -315,6 +315,8 @@ def _build_tts(prefix: str) -> discord.Embed:
             f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …`; "
             f"{_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
             "Lệnh bot (tin bắt đầu bằng tiền tố) không được đọc. "
+            "Khi có người vào đúng kênh thoại của bot, bot chỉ đọc tên người đó. "
+            "Rời phòng, tắt mic, hoặc tắt nghe không được đọc. "
             "Khi nhạc đang phát, bot giảm âm lượng nhạc, đọc tin, rồi khôi phục."
         ),
         inline=False,
