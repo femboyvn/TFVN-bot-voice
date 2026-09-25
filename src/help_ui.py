@@ -43,6 +43,10 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Dừng nhạc, tắt đọc chat, và rời kênh thoại.",
     ),
+    "forceleave": (
+        "",
+        "Buộc bot rời khi nó kẹt sau khi kênh thoại tạm bị xóa. Cần quyền Quản trị viên.",
+    ),
     "nameannounce": (
         "on | off",
         "Bật hoặc tắt đọc tên người gửi trước nội dung tin nhắn TTS.",
@@ -264,7 +268,10 @@ def _build_commands(prefix: str) -> discord.Embed:
     )
     embed.add_field(
         name="Thoại và TTS",
-        value=_command_lines(prefix, ("join", "leave", "nameannounce", "soundboard")),
+        value=_command_lines(
+            prefix,
+            ("join", "leave", "forceleave", "nameannounce", "soundboard"),
+        ),
         inline=False,
     )
     embed.add_field(
@@ -295,6 +302,7 @@ def _build_tts(prefix: str) -> discord.Embed:
             f"{_command(prefix, 'join')} hoặc nút **Đọc tin nhắn** trên bảng — "
             "bắt đầu đọc chat kênh thoại, không dừng nhạc.\n"
             f"{_command(prefix, 'leave')} hoặc nút **Rời** — tắt đọc chat, dừng nhạc, và rời phòng.\n"
+            f"{_command(prefix, 'forceleave')} — quản trị viên buộc bot thoát khi nó kẹt trong kênh thoại đã bị xóa.\n"
             f"{_command(prefix, 'stop')} hoặc nút **Dừng** — chỉ dừng nhạc; phiên đọc chat vẫn chạy."
         ),
         inline=False,
@@ -403,6 +411,10 @@ _COMMAND_DETAILS: dict[str, str] = {
         "Bot ở lại phòng ngay cả khi hàng đợi nhạc trống."
     ),
     "leave": "Đây là cách tắt hết nhạc, TTS, và kết nối thoại.",
+    "forceleave": (
+        "Chỉ quản trị viên. Dùng khi bot kẹt lại sau khi kênh thoại tạm thời "
+        "đã bị xóa. Bot đang ở phòng còn hoạt động thì vào phòng đó và dùng leave."
+    ),
     "nameannounce": (
         "Chỉ dùng khi phiên đọc chat đang chạy. Giá trị được lưu cho máy chủ "
         "(đến khi bot khởi động lại) và dùng cho phiên sau. "

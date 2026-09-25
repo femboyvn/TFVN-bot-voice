@@ -50,6 +50,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd playlist` / `/playlist` | Open personal or server playlists; `!tfd help playlist` lists editing commands |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
+| `!tfd forceleave` | Administrator only. Drop the bot when it is stuck in a deleted temporary voice channel |
 | `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
 | `!tfd play <URL or query>` | Join voice and queue a YouTube or Spotify track/playlist |
 | `!tfd next <URL or query>` | Add another track or playlist to the queue |
@@ -127,10 +128,14 @@ the same text channel and then deletes the superseded panel, without changing mu
 queue, voice-room binding, or TTS state. If deleting the old message fails, its
 controls are disabled instead. Automatic bumps pause while the bot is disconnected.
 After a bot restart, the bot rejoins the last bound voice room and restores the
-queue when at least one human is still there. **Xóa hàng đợi** removes waiting tracks
+queue when at least one human is still there. If that rejoin exceeds
+`VOICE_CONNECT_TIMEOUT`, or every `VOICE_CONNECT_RETRIES` attempt fails, the bot
+stops trying, disconnects, and says that it has disconnected. **Xóa hàng đợi** removes waiting tracks
 but leaves the current track playing. **Dừng** stops the current track and clears the
 queue without ending chat reading or immediately leaving voice; `!tfd leave` stops
-music, ends chat reading, and disconnects. When chat reading is off, the normal player
+music, ends chat reading, and disconnects. If the bot is stuck in a temporary voice
+channel that was deleted, an administrator runs `!tfd forceleave` from any text
+channel. When chat reading is off, the normal player
 idle timeout may disconnect the bot later.
 
 All voice and playback commands use the same room rule as the panel. If the bot is
@@ -219,6 +224,9 @@ normal rebuilds; `docker compose down -v` deletes named volumes and their data.
 5. Bot commands (`!tfd …`) are not read aloud.
 6. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
 7. `!tfd leave` ends monitoring and disconnects.
+8. An administrator runs `!tfd forceleave` when the bot is stuck in a deleted
+   temporary voice channel. A room that still exists keeps the bot; use `!tfd leave`
+   from that room.
 
 While a session is active, the bot stays in the VC even after the music queue goes idle.
 Chat TTS requires `TTS_ENABLED=true` (default) and network access for gTTS.

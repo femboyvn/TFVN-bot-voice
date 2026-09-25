@@ -31,6 +31,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
                     "search",
                     "join",
                     "leave",
+                    "forceleave",
                     "nameannounce",
                     "soundboard",
                     "playlist",

@@ -12,6 +12,7 @@ from discord.ext import commands
 
 from src.media import MediaBatch, MediaExtractionError, QueuedTrack, SearchResult
 from src.cogs.music import MusicCog
+from src.voice import VoiceConnectionFailed
 from src.music_ui import PANEL_INTERACTION_TOKEN
 from src.player import GuildAudioSettings, JumpResult
 from src.playlists import PlaybackSession
@@ -269,16 +270,172 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         other = Mock()
         other.id = 99
         self.ctx.author.voice.channel = other
+        self.ctx.author.guild_permissions.administrator = True
         self.ctx.voice_client.is_connected.return_value = False
 
         with patch(
             "src.cogs.music.disconnect_guild_voice_client",
             new=AsyncMock(return_value=False),
-        ):
+        ) as disconnect:
             await self.cog.leave.callback(self.cog, self.ctx)
 
         self.sessions.stop.assert_awaited_once_with(1)
         self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        disconnect.assert_awaited_once_with(
+            self.ctx.guild,
+            expected_client=self.ctx.voice_client,
+            force=True,
+        )
+        self.assertIn("đã xóa", self.ctx.send.await_args.args[0].lower())
+
+    async def test_leave_force_clears_deleted_channel_without_a_session(self) -> None:
+        self.sessions.get.return_value = None
+        self.sessions.stop = AsyncMock(return_value=False)
+        self.players.remove = AsyncMock(return_value=True)
+        self.cog.music_ui.refresh = AsyncMock()
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        self.ctx.voice_client.is_connected.return_value = True
+        other = Mock()
+        other.id = 99
+        self.ctx.author.voice.channel = other
+        self.ctx.author.guild_permissions.administrator = True
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=True),
+        ) as disconnect:
+            await self.cog.leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_awaited_once_with(
+            self.ctx.guild,
+            expected_client=self.ctx.voice_client,
+            force=True,
+        )
+        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        self.assertIn("đã xóa", self.ctx.send.await_args.args[0].lower())
+
+    async def test_force_leave_drops_client_stuck_in_deleted_channel(self) -> None:
+        self.sessions.get.return_value = None
+        self.sessions.stop = AsyncMock(return_value=False)
+        self.players.remove = AsyncMock(return_value=False)
+        self.cog.music_ui.refresh = AsyncMock()
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        self.ctx.voice_client.is_connected.return_value = True
+        self.ctx.author.voice.channel = None
+        self.ctx.author.guild_permissions.administrator = True
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=True),
+        ) as disconnect:
+            await self.cog.force_leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_awaited_once_with(
+            self.ctx.guild,
+            expected_client=self.ctx.voice_client,
+            force=True,
+        )
+        self.assertIn("đã xóa", self.ctx.send.await_args.args[0].lower())
+
+    async def test_force_leave_confirms_a_stale_cached_channel_was_deleted(self) -> None:
+        channel = self.ctx.voice_client.channel
+        self.ctx.guild.get_channel = Mock(return_value=channel)
+        response = Mock(status=404, reason="Not Found")
+        self.ctx.guild.fetch_channel = AsyncMock(
+            side_effect=discord.NotFound(response, "Unknown Channel")
+        )
+        self.sessions.get.return_value = None
+        self.sessions.stop = AsyncMock(return_value=False)
+        self.players.remove = AsyncMock(return_value=True)
+        self.cog.music_ui.refresh = AsyncMock()
+        self.ctx.author.voice.channel = None
+        self.ctx.author.guild_permissions.administrator = True
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(return_value=True),
+        ) as disconnect:
+            await self.cog.force_leave.callback(self.cog, self.ctx)
+
+        self.ctx.guild.fetch_channel.assert_awaited_once_with(7)
+        disconnect.assert_awaited_once_with(
+            self.ctx.guild,
+            expected_client=self.ctx.voice_client,
+            force=True,
+        )
+
+    async def test_force_leave_rejects_a_live_room(self) -> None:
+        channel = self.ctx.voice_client.channel
+        self.ctx.guild.get_channel = Mock(return_value=channel)
+        self.ctx.guild.fetch_channel = AsyncMock(return_value=channel)
+        self.ctx.author.guild_permissions.administrator = True
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.force_leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_not_awaited()
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        sent = self.ctx.send.await_args.args[0]
+        self.assertIn("leave", sent)
+        self.assertNotIn("đã xóa", sent.lower())
+
+    async def test_force_leave_reports_when_nothing_is_connected(self) -> None:
+        self.ctx.guild.voice_client = None
+        self.sessions.get.return_value = None
+        self.ctx.author.guild_permissions.administrator = True
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.force_leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_not_awaited()
+        self.players.remove.assert_not_awaited()
+        self.assertIn("chưa kết nối", self.ctx.send.await_args.args[0].lower())
+
+    async def test_force_leave_requires_administrator(self) -> None:
+        self.ctx.author.guild_permissions.administrator = False
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.force_leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_not_awaited()
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        self.assertIn("quản trị viên", self.ctx.send.await_args.args[0].lower())
+
+    async def test_leave_on_deleted_channel_requires_administrator(self) -> None:
+        self.ctx.author.guild_permissions.administrator = False
+        self.ctx.guild.get_channel = Mock(return_value=None)
+        self.sessions.get.return_value = None
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+
+        with patch(
+            "src.cogs.music.disconnect_guild_voice_client",
+            new=AsyncMock(),
+        ) as disconnect:
+            await self.cog.leave.callback(self.cog, self.ctx)
+
+        disconnect.assert_not_awaited()
+        self.players.remove.assert_not_awaited()
+        self.sessions.stop.assert_not_awaited()
+        self.assertIn("quản trị viên", self.ctx.send.await_args.args[0].lower())
 
     async def test_bot_voice_disconnect_stops_session_and_refreshes_panel(
         self,
@@ -325,10 +482,15 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "src.cogs.music.disconnect_guild_voice_client",
             new=AsyncMock(return_value=False),
-        ):
+        ) as disconnect:
             await self.cog.on_guild_channel_delete(channel)
 
         self.sessions.stop.assert_awaited_once_with(1)
+        disconnect.assert_awaited_once_with(
+            self.ctx.guild,
+            expected_client=self.ctx.voice_client,
+            force=True,
+        )
         self.cog.music_ui.drop_if_channel.assert_awaited_once_with(1, 7)
         self.cog.music_ui.refresh.assert_not_awaited()
 
@@ -1011,6 +1173,62 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(player.loop_queue)
         player.enqueue_many.assert_awaited_once()
         self.cog.music_ui.post_panel.assert_awaited_once_with(text, 1, 7)
+
+    async def test_restore_declares_disconnect_when_rejoin_times_out(self) -> None:
+        session = PlaybackSession(
+            guild_id=1,
+            voice_channel_id=7,
+            text_channel_id=8,
+        )
+        self.playlists.list_playback = AsyncMock(return_value=(session,))
+        voice = Mock()
+        voice.members = [Mock(bot=False)]
+        text = Mock()
+        text.send = AsyncMock()
+        guild = Mock()
+        guild.id = 1
+        guild.get_channel.side_effect = lambda channel_id: {7: voice, 8: text}[channel_id]
+        self.bot.get_guild.return_value = guild
+        player = Mock()
+        self.players.get_or_create = AsyncMock(return_value=player)
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+        self.cog.music_ui.refresh = AsyncMock()
+        message = (
+            "Hết thời gian kết nối lại kênh thoại. Bot đã dừng và ngắt kết nối."
+        )
+
+        with patch(
+            "src.cogs.music.connect_voice_channel",
+            new=AsyncMock(side_effect=VoiceConnectionFailed(message)),
+        ):
+            await self.cog._restore_playback_sessions()
+
+        text.send.assert_awaited_once_with(message)
+        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        self.sessions.stop.assert_awaited_once_with(1)
+        player.enqueue_many.assert_not_called()
+        self.cog.music_ui.refresh.assert_awaited_once_with(1)
+
+    async def test_failed_rejoin_stops_playback_and_declares_disconnect(self) -> None:
+        self.players.remove = AsyncMock()
+        self.sessions.stop = AsyncMock()
+        self.cog.music_ui.refresh = AsyncMock()
+        message = (
+            "Hết thời gian kết nối lại kênh thoại. Bot đã dừng và ngắt kết nối."
+        )
+
+        with patch(
+            "src.cogs.music.get_or_connect_voice_client",
+            new=AsyncMock(side_effect=VoiceConnectionFailed(message)),
+        ):
+            result = await self.cog._connect_for_context(self.ctx)
+
+        self.assertIsNone(result)
+        self.ctx.send.assert_awaited_once_with(message)
+        self.players.remove.assert_awaited_once_with(1, disconnect=False)
+        self.sessions.stop.assert_awaited_once_with(1)
+        self.cog.music_ui.refresh.assert_awaited_once_with(1)
 
     async def test_restore_skips_empty_room_and_non_list_members(self) -> None:
         session = PlaybackSession(1, 7, 8)

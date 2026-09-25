@@ -64,6 +64,8 @@ from ..soundboard_ui import SoundboardView
 from ..spotify import is_spotify_input
 from ..voice import (
     VoiceAccessError,
+    VoiceConnectionFailed,
+    channel_was_deleted,
     connect_member_voice_client,
     connect_voice_channel,
     disconnect_guild_voice_client,
@@ -72,6 +74,7 @@ from ..voice import (
     live_voice_channel_id,
     member_voice_channel,
     same_voice_channel_error,
+    voice_channel_missing,
     voice_client_is_live,
 )
 
@@ -239,6 +242,11 @@ class MusicCog(commands.Cog, name="Music"):
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
 
     @staticmethod
+    def _is_administrator(user: object) -> bool:
+        permissions = getattr(user, "guild_permissions", None)
+        return getattr(permissions, "administrator", False) is True
+
+    @staticmethod
     def _require_server_playlist_manage(user: object) -> None:
         permissions = getattr(user, "guild_permissions", None)
         if not getattr(permissions, "manage_guild", False):
@@ -360,8 +368,15 @@ class MusicCog(commands.Cog, name="Music"):
                 expected_channel_id is not None
                 and not guild_channel_exists(ctx.guild, expected_channel_id)
             )
-            if bound_missing:
-                await self._leave_voice(ctx)
+            # A deleted temporary channel kicks everyone, so the room check
+            # cannot be satisfied. Only an administrator may drop that client.
+            if bound_missing or self._voice_client_channel_missing(ctx.guild):
+                if not self._is_administrator(ctx.author):
+                    await ctx.send(
+                        "Chỉ quản trị viên mới buộc được bot rời kênh thoại đã xóa."
+                    )
+                    return
+                await self._leave_voice(ctx, force=True)
                 return
             if not await self._require_voice_control(
                 ctx,
@@ -370,6 +385,40 @@ class MusicCog(commands.Cog, name="Music"):
             ):
                 return
             await self._leave_voice(ctx)
+
+    @commands.command(name="forceleave")
+    @commands.guild_only()
+    async def force_leave(self, ctx: commands.Context[Any]) -> None:
+        """Drop a voice client stuck in a deleted temporary voice channel."""
+        if not self._is_administrator(ctx.author):
+            await ctx.send(
+                "Chỉ quản trị viên mới buộc được bot rời kênh thoại đã xóa."
+            )
+            return
+        async with self._operation_lock(ctx.guild.id):
+            removed_channel_id = await self._stuck_deleted_voice_channel(ctx.guild)
+            if removed_channel_id is None:
+                if voice_client_is_live(ctx.guild, ctx.guild.voice_client):
+                    await ctx.send(
+                        "Bot vẫn đang ở kênh thoại. Vào phòng đó và dùng "
+                        f"`{ctx.prefix}leave`."
+                    )
+                    return
+                session = self.sessions.get(ctx.guild.id)
+                if session is not None and session.active:
+                    await ctx.send(
+                        "Phiên thoại vẫn gắn với phòng đang còn. Vào phòng đó "
+                        f"và dùng `{ctx.prefix}leave`."
+                    )
+                    return
+                await ctx.send("Bot chưa kết nối kênh thoại.")
+                return
+            log.info(
+                "Force-leaving deleted voice channel %s in guild %s",
+                removed_channel_id,
+                ctx.guild.id,
+            )
+            await self._leave_voice(ctx, force=True)
 
     @commands.command(name="nameannounce")
     @commands.guild_only()
@@ -677,6 +726,13 @@ class MusicCog(commands.Cog, name="Music"):
             if tracks:
                 await player.enqueue_many(tracks, text)
             await self.music_ui.post_panel(text, guild.id, session.voice_channel_id)
+        except VoiceConnectionFailed as exc:
+            log.warning("Restore rejoin failed for guild %s: %s", guild.id, exc)
+            await self._stop_after_failed_rejoin(guild)
+            send = getattr(text, "send", None)
+            if callable(send):
+                with contextlib.suppress(discord.HTTPException, OSError):
+                    await send(str(exc))
         except VoiceAccessError as exc:
             log.warning("Restore skipped for guild %s: %s", guild.id, exc)
         finally:
@@ -738,6 +794,7 @@ class MusicCog(commands.Cog, name="Music"):
                     guild,
                     channel_id,
                     require_binding=True,
+                    force=True,
                 )
                 return
             await self.music_ui.drop_if_channel(guild.id, channel_id)
@@ -748,6 +805,7 @@ class MusicCog(commands.Cog, name="Music"):
         previous_channel_id: int,
         *,
         require_binding: bool = False,
+        force: bool = False,
     ) -> None:
         """Clear session/panel pins after Discord already dropped the bot."""
         if voice_client_is_live(guild, guild.voice_client):
@@ -767,7 +825,10 @@ class MusicCog(commands.Cog, name="Music"):
         if require_binding and not session_bound and not panel_bound:
             return
 
-        await self._stop_all_and_disconnect(guild)
+        await self._stop_all_and_disconnect(
+            guild,
+            force=force or not guild_channel_exists(guild, previous_channel_id),
+        )
         if not guild_channel_exists(guild, previous_channel_id):
             await self.music_ui.drop_if_channel(guild.id, previous_channel_id)
             return
@@ -937,13 +998,45 @@ class MusicCog(commands.Cog, name="Music"):
         ctx: commands.Context[Any],
     ) -> discord.VoiceClient | None:
         """Connect a command caller without moving an occupied voice client."""
-        voice_client = await get_or_connect_voice_client(ctx, self.settings)
+        try:
+            voice_client = await get_or_connect_voice_client(ctx, self.settings)
+        except VoiceConnectionFailed as exc:
+            await ctx.send(str(exc))
+            await self._stop_after_failed_rejoin(ctx.guild)
+            return None
         if voice_client is not None and voice_client.channel is not None:
             await self.music_ui.invalidate_if_channel_changed(
                 ctx.guild.id,
                 voice_client.channel.id,
             )
         return voice_client
+
+    async def _connect_member(
+        self,
+        guild: discord.Guild,
+        member: object,
+        *,
+        expected_channel_id: int | None = None,
+    ) -> discord.VoiceClient:
+        """Connect *member*, and stop playback if the rejoin attempt fails."""
+        try:
+            return await connect_member_voice_client(
+                guild,
+                member,
+                self.settings,
+                expected_channel_id=expected_channel_id,
+            )
+        except VoiceConnectionFailed:
+            await self._stop_after_failed_rejoin(guild)
+            raise
+
+    async def _stop_after_failed_rejoin(self, guild: discord.Guild) -> None:
+        """Retire music and chat reading after a rejoin attempt has given up."""
+        await self.players.remove(guild.id, disconnect=False)
+        await self.sessions.stop(guild.id)
+        with contextlib.suppress(PlaylistError):
+            await self.playlists.clear_playback(guild.id)
+        await self.music_ui.refresh(guild.id)
 
     async def _require_voice_control(
         self,
@@ -1114,10 +1207,9 @@ class MusicCog(commands.Cog, name="Music"):
             player.reserve_activity()
             try:
                 try:
-                    await connect_member_voice_client(
+                    await self._connect_member(
                         guild,
                         interaction.user,
-                        self.settings,
                         expected_channel_id=voice_channel_id,
                     )
                 except VoiceAccessError as exc:
@@ -1158,10 +1250,9 @@ class MusicCog(commands.Cog, name="Music"):
             player.reserve_activity()
             try:
                 try:
-                    await connect_member_voice_client(
+                    await self._connect_member(
                         guild,
                         interaction.user,
-                        self.settings,
                         expected_channel_id=voice_channel_id,
                     )
                 except VoiceAccessError as exc:
@@ -1617,10 +1708,9 @@ class MusicCog(commands.Cog, name="Music"):
                 player.reserve_activity()
             try:
                 try:
-                    voice_client = await connect_member_voice_client(
+                    voice_client = await self._connect_member(
                         guild,
                         interaction.user,
-                        self.settings,
                         expected_channel_id=voice_channel_id,
                     )
                 except VoiceAccessError as exc:
@@ -1757,10 +1847,9 @@ class MusicCog(commands.Cog, name="Music"):
             player.reserve_activity()
             try:
                 try:
-                    await connect_member_voice_client(
+                    await self._connect_member(
                         guild,
                         interaction.user,
-                        self.settings,
                         expected_channel_id=voice_channel_id,
                     )
                 except VoiceAccessError as exc:
@@ -1816,15 +1905,90 @@ class MusicCog(commands.Cog, name="Music"):
         self.players.remove_state_listener(self._persist_playback_state)
         await self.music_ui.close()
 
-    async def _leave_voice(self, ctx: commands.Context[Any]) -> None:
+    def _voice_client_channel_missing(self, guild: discord.Guild) -> bool:
+        return voice_channel_missing(guild, guild.voice_client)
+
+    async def _stuck_deleted_voice_channel(
+        self,
+        guild: discord.Guild,
+    ) -> int | None:
+        """Return a deleted channel id when the bot is stuck, else None.
+
+        A live client whose channel still exists is a normal room and is not
+        stuck, even if an older session pin points somewhere else. ``0`` means
+        the cached client has no channel left to name.
+        """
+        voice_client = guild.voice_client
+        client_channel_id = getattr(
+            getattr(voice_client, "channel", None), "id", None,
+        )
+        if (
+            voice_client_is_live(guild, voice_client)
+            and isinstance(client_channel_id, int)
+        ):
+            if await channel_was_deleted(guild, client_channel_id):
+                return client_channel_id
+            return None
+
+        candidate_ids: list[int] = []
+        if isinstance(client_channel_id, int):
+            candidate_ids.append(client_channel_id)
+        session = self.sessions.get(guild.id)
+        if session is not None and session.active:
+            session_channel_id = getattr(session, "voice_channel_id", None)
+            if isinstance(session_channel_id, int):
+                candidate_ids.append(session_channel_id)
+        record = self.music_ui.get(guild.id)
+        record_channel_id = getattr(record, "voice_channel_id", None)
+        if isinstance(record_channel_id, int):
+            candidate_ids.append(record_channel_id)
+
+        seen: set[int] = set()
+        for channel_id in candidate_ids:
+            if channel_id in seen:
+                continue
+            seen.add(channel_id)
+            if await channel_was_deleted(guild, channel_id):
+                return channel_id
+
+        if voice_client is not None and not voice_client_is_live(guild, voice_client):
+            channel = getattr(voice_client, "channel", None)
+            if channel is None or (
+                isinstance(client_channel_id, int)
+                and not guild_channel_exists(guild, client_channel_id)
+            ):
+                return client_channel_id if isinstance(client_channel_id, int) else 0
+        return None
+
+    async def _refresh_or_drop_panel(self, guild: discord.Guild) -> None:
+        record = self.music_ui.get(guild.id)
+        channel_id = getattr(record, "voice_channel_id", None)
+        if (
+            record is not None
+            and isinstance(channel_id, int)
+            and not guild_channel_exists(guild, channel_id)
+        ):
+            await self.music_ui.drop_if_channel(guild.id, channel_id)
+            return
+        await self.music_ui.refresh(guild.id)
+
+    async def _leave_voice(
+        self,
+        ctx: commands.Context[Any],
+        *,
+        force: bool = False,
+    ) -> None:
         """Stop music, end the chat session, and disconnect from voice."""
         had_player, had_session, disconnected = (
-            await self._stop_all_and_disconnect(ctx.guild)
+            await self._stop_all_and_disconnect(ctx.guild, force=force)
         )
 
-        await self.music_ui.refresh(ctx.guild.id)
+        await self._refresh_or_drop_panel(ctx.guild)
 
         if had_player or had_session or disconnected:
+            if force:
+                await ctx.send("Đã buộc bot rời kênh thoại đã xóa.")
+                return
             if had_session:
                 await ctx.send("Đã rời kênh thoại và dừng theo dõi chat.")
             else:
@@ -1835,6 +1999,8 @@ class MusicCog(commands.Cog, name="Music"):
     async def _stop_all_and_disconnect(
         self,
         guild: discord.Guild,
+        *,
+        force: bool = False,
     ) -> tuple[bool, bool, bool]:
         """Stop music and chat reading, then leave the captured voice client."""
         voice_client = guild.voice_client
@@ -1844,11 +2010,24 @@ class MusicCog(commands.Cog, name="Music"):
             await self.playlists.clear_playback(guild.id)
 
         disconnected = False
-        if voice_client and voice_client.is_connected():
-            disconnected = await disconnect_guild_voice_client(
-                guild,
-                expected_client=voice_client,
-            )
+        if voice_client is not None:
+            missing = voice_channel_missing(guild, voice_client)
+            is_connected = getattr(voice_client, "is_connected", None)
+            connected = False
+            if callable(is_connected):
+                with contextlib.suppress(Exception):
+                    connected = bool(is_connected())
+            if force or missing:
+                disconnected = await disconnect_guild_voice_client(
+                    guild,
+                    expected_client=voice_client,
+                    force=True,
+                )
+            elif connected:
+                disconnected = await disconnect_guild_voice_client(
+                    guild,
+                    expected_client=voice_client,
+                )
         return had_player, had_session, disconnected
 
     async def cog_command_error(
