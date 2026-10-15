@@ -224,8 +224,9 @@ def _build_panel(prefix: str) -> discord.Embed:
             "Dòng chữ **Đang phát** vẫn được gửi khi tắt đọc.\n"
             "**Đọc tin nhắn** — đọc chat văn bản của kênh thoại.\n"
             "**Bảng âm thanh** — thêm URL hoặc tìm MyInstants, phát clip đè lên nhạc.\n"
-            "**Cài đặt** — âm lượng nhạc, mức nhạc khi TTS, ngôn ngữ TTS, "
-            "đọc tên người gửi, và tự đưa bảng lên.\n"
+            "**Cài đặt âm thanh** — bật hoặc tắt đọc tên bài hát, đọc tin nhắn, "
+            "đọc tên người gửi, và thông báo tham gia, rời đi, tắt âm, tắt mic. "
+            "Nút **Âm lượng** trong đó mở form âm lượng, ngôn ngữ TTS, và đưa bảng lên.\n"
             "**Rời** — dừng nhạc, tắt đọc chat, và rời kênh thoại.\n"
             "**Trợ giúp** — menu này, không cần ở trong kênh thoại."
         ),
@@ -311,12 +312,17 @@ def _build_tts(prefix: str) -> discord.Embed:
         name="Cách đọc",
         value=(
             "Mặc định chỉ đọc nội dung tin nhắn. "
-            "Đặt **Đọc tên người gửi** thành `on` trong **Cài đặt**, hoặc "
+            "Bật **Đọc tên người gửi** trong **Cài đặt âm thanh**, hoặc "
             f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …`; "
             f"{_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
             "Lệnh bot (tin bắt đầu bằng tiền tố) không được đọc. "
-            "Khi có người vào đúng kênh thoại của bot, bot chỉ đọc tên người đó. "
-            "Rời phòng, tắt mic, hoặc tắt nghe không được đọc. "
+            "**Thông báo người tham gia** (mặc định bật) đọc `Tên đã tham gia`. "
+            "**Thông báo người rời đi**, **Thông báo tắt âm**, và **Thông báo tắt mic** "
+            "mặc định tắt. Tự tắt mic đọc `Tên đã tắt mic` hoặc `Tên đã bật mic`. "
+            "Server mute đọc `Tên đã bị nhét giẻ vào mồm`. "
+            "Tự tắt âm đọc `Tên đã tắt âm` hoặc `Tên đã bật âm`. "
+            "Server deafen đọc `Tên đã bị đấm thủng lỗ tai`. "
+            "Âm và mic cùng nguồn đổi cùng lúc thì chỉ đọc câu âm.\n"
             "Khi nhạc đang phát, bot giảm âm lượng nhạc, đọc tin, rồi khôi phục."
         ),
         inline=False,
@@ -324,9 +330,10 @@ def _build_tts(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Đọc tên bài",
         value=(
-            "Nút **Đọc tên bài** bật hoặc tắt đọc tiêu đề khi bài mới bắt đầu. "
+            "Nút **Đọc tên bài** trên bảng, hoặc **Đọc tên bài hát** trong "
+            "**Cài đặt âm thanh**, bật hoặc tắt đọc tiêu đề khi bài mới bắt đầu. "
             "Tắt đọc thì dòng chữ **Đang phát** vẫn được gửi. "
-            "Cả hai nút đọc sẽ mờ khi TTS bị tắt trên bot."
+            "Các nút đọc mờ khi TTS bị tắt trên bot."
         ),
         inline=False,
     )
@@ -336,19 +343,27 @@ def _build_tts(prefix: str) -> discord.Embed:
 def _build_settings(prefix: str) -> discord.Embed:
     embed = _base_embed(
         "Cài đặt âm thanh",
-        "Nút **Cài đặt** trên bảng mở form riêng. "
+        "Nút **Cài đặt âm thanh** trên bảng mở các nút bật/tắt. "
         "Thông số dùng chung cho cả máy chủ, không theo từng người. "
         "Mất khi bot khởi động lại.",
     )
     embed.add_field(
-        name="Các mục",
+        name="Các nút",
         value=(
-            "**Âm lượng nhạc** — `0`–`200` (phần trăm). Chỉ ảnh hưởng nhạc, không đổi độ lớn TTS.\n"
-            "**Âm lượng nhạc khi TTS** — `0`–`100`. `0` tạm tắt nhạc lúc đọc; `100` không giảm.\n"
-            "**Ngôn ngữ TTS** — mã gTTS như `vi`, `en`, `ja`, `ko`.\n"
-            "**Đọc tên người gửi** — `on` hoặc `off` (mặc định `off`). Khi `on`, "
-            "TTS đọc `Tên nói …` trước nội dung tin nhắn.\n"
-            "**Đưa bảng lên lại** — `0` tắt; `1`–`1440` phút tự gửi lại bảng."
+            "**Đọc tên bài hát** — đọc tiêu đề khi bài mới bắt đầu. Mặc định bật khi TTS bật.\n"
+            "**Đọc tin nhắn** — đọc chat của kênh thoại. Mặc định tắt.\n"
+            "**Đọc tên người gửi** — đọc `Tên nói …`. mặc định `off`. "
+            f"Lệnh {_command(prefix, 'nameannounce', 'on')} cũng dùng `on` hoặc `off`.\n"
+            "**Thông báo người tham gia** — đọc `Tên đã tham gia`. Mặc định bật.\n"
+            "**Thông báo người rời đi** — đọc `Tên đã rời đi`. Mặc định tắt.\n"
+            "**Thông báo tắt âm** — tự tắt đọc `Tên đã tắt âm` hoặc `Tên đã bật âm`. "
+            "Server đọc `Tên đã bị đấm thủng lỗ tai`. Mic cùng nguồn cùng lúc thì chỉ đọc câu âm. "
+            "Mặc định tắt.\n"
+            "**Thông báo tắt mic** — tự tắt đọc `Tên đã tắt mic` hoặc `Tên đã bật mic`. "
+            "Server đọc `Tên đã bị nhét giẻ vào mồm`. Gỡ server mute hoặc server deafen thì im. "
+            "Mặc định tắt.\n"
+            "**Âm lượng** — form âm lượng nhạc `0`–`200`, mức nhạc khi TTS `0`–`100`, "
+            "ngôn ngữ TTS (`vi`, `en`, `ja`, `ko`), và đưa bảng lên (`0` hoặc `1`–`1440`)."
         ),
         inline=False,
     )
@@ -356,15 +371,16 @@ def _build_settings(prefix: str) -> discord.Embed:
         name="Khi nào có hiệu lực",
         value=(
             "Âm lượng nhạc và mức giảm khi TTS áp ngay cho bài đang phát. "
-            "Đổi ngôn ngữ dùng cho tin TTS tiếp theo; đoạn đang đọc có thể giữ ngôn ngữ cũ.\n"
-            "Khi TTS tắt trên bot, form còn âm lượng nhạc và đưa bảng lên; "
-            "các mục TTS bị ẩn và không đổi."
+            "Đổi ngôn ngữ dùng cho tin TTS tiếp theo; đoạn đang đọc có thể giữ ngôn ngữ cũ. "
+            "Nút đọc tên người gửi áp dụng cho phiên chat đang chạy.\n"
+            "Khi TTS tắt trên bot, các nút đọc mờ. Form **Âm lượng** còn âm lượng nhạc "
+            "và đưa bảng lên; các mục TTS không đổi."
         ),
         inline=False,
     )
     embed.add_field(
         name="Lệnh liên quan",
-        value=f"{_command(prefix, 'music')} mở bảng để vào **Cài đặt**.",
+        value=f"{_command(prefix, 'music')} mở bảng để vào **Cài đặt âm thanh**.",
         inline=False,
     )
     return embed

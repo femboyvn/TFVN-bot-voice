@@ -109,6 +109,90 @@ def sanitize_for_speech(content: str) -> str:
     return text
 
 
+def voice_event_announcement(
+    *,
+    member_is_bot: bool,
+    before_channel_id: int | None,
+    after_channel_id: int | None,
+    bot_channel_id: int | None,
+    display_name: str,
+    before_self_muted: bool = False,
+    after_self_muted: bool = False,
+    before_server_muted: bool = False,
+    after_server_muted: bool = False,
+    before_self_deafened: bool = False,
+    after_self_deafened: bool = False,
+    before_server_deafened: bool = False,
+    after_server_deafened: bool = False,
+    announce_join: bool = True,
+    announce_leave: bool = False,
+    announce_mute: bool = False,
+    announce_deafen: bool = False,
+) -> str | None:
+    """Return the spoken presence line, or None when nothing should be said.
+
+    A join or leave is a channel change into or out of the bot's room.
+    Self and server mute or deafen are separate, and each is spoken only
+    when the person stays in that room and the matching toggle is on.
+    A deafen of one source includes that source's mute, so both changing
+    together speaks only the âm line. Removing a server mute or server
+    deafen stays silent. Bots and an empty display name stay silent.
+    """
+    if member_is_bot or bot_channel_id is None:
+        return None
+    name = sanitize_for_speech(display_name)
+    if not name:
+        return None
+    joined = (
+        after_channel_id == bot_channel_id
+        and before_channel_id != bot_channel_id
+    )
+    left = (
+        before_channel_id == bot_channel_id
+        and after_channel_id != bot_channel_id
+    )
+    stayed = (
+        before_channel_id == bot_channel_id
+        and after_channel_id == bot_channel_id
+    )
+    lines: list[str] = []
+    if joined and announce_join:
+        lines.append(f"{name} đã tham gia")
+    if left and announce_leave:
+        lines.append(f"{name} đã rời đi")
+    server_deaf_on = (
+        stayed and not before_server_deafened and after_server_deafened
+    )
+    self_deaf_on = (
+        stayed and not before_self_deafened and after_self_deafened
+    )
+    self_deaf_off = (
+        stayed and before_self_deafened and not after_self_deafened
+    )
+    server_mute_on = (
+        stayed and not before_server_muted and after_server_muted
+    )
+    self_mute_on = stayed and not before_self_muted and after_self_muted
+    self_mute_off = stayed and before_self_muted and not after_self_muted
+    # A deafen from one source also changes that source's mute. Speak only
+    # the âm line for that pair. Server and self actions stay independent.
+    if server_deaf_on and announce_deafen:
+        lines.append(f"{name} đã bị đấm thủng lỗ tai")
+    elif server_mute_on and announce_mute:
+        lines.append(f"{name} đã bị nhét giẻ vào mồm")
+    if self_deaf_on and announce_deafen:
+        lines.append(f"{name} đã tắt âm")
+    elif self_deaf_off and announce_deafen:
+        lines.append(f"{name} đã bật âm")
+    elif self_mute_on and announce_mute:
+        lines.append(f"{name} đã tắt mic")
+    elif self_mute_off and announce_mute:
+        lines.append(f"{name} đã bật mic")
+    if not lines:
+        return None
+    return ". ".join(lines)
+
+
 def join_announcement_name(
     *,
     member_is_bot: bool,
@@ -117,20 +201,15 @@ def join_announcement_name(
     bot_channel_id: int | None,
     display_name: str,
 ) -> str | None:
-    """Return only a joiner's name, or None when this update is not a join.
-
-    A join is entering the bot's current voice channel from outside it.
-    The spoken text is the display name alone. Leaving, muting, deafening,
-    and staying in the same channel produce no announcement.
-    """
-    if member_is_bot or bot_channel_id is None:
-        return None
-    if after_channel_id != bot_channel_id or before_channel_id == bot_channel_id:
-        return None
-    name = sanitize_for_speech(display_name)
-    if not name:
-        return None
-    return name
+    """Return ``"{name} đã tham gia"``, or None when this update is not a join."""
+    return voice_event_announcement(
+        member_is_bot=member_is_bot,
+        before_channel_id=before_channel_id,
+        after_channel_id=after_channel_id,
+        bot_channel_id=bot_channel_id,
+        display_name=display_name,
+        announce_join=True,
+    )
 
 
 def prepare_chat_speech(

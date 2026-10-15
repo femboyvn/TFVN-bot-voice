@@ -11,6 +11,7 @@ from src.help_ui import HelpMenuView
 from src.music_ui import (
     AddInputResult,
     AddMusicModal,
+    AudioSettingsMenuView,
     AudioSettingsModal,
     AudioSettingsValidationError,
     ClearQueueConfirmation,
@@ -72,6 +73,9 @@ class _Actions:
         )
         self.ui_toggle_chat_reading = AsyncMock(
             return_value="Đã bật đọc tin nhắn."
+        )
+        self.ui_toggle_voice_notice = AsyncMock(
+            return_value="Đã bật thông báo người tham gia."
         )
         self.ui_update_audio_settings = AsyncMock(
             return_value=(
@@ -171,7 +175,8 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in embed.fields}
         self.assertEqual(
             values["Cài đặt âm thanh"],
-            "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW · Đọc tên: Tắt",
+            "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW · "
+            "Đọc tên: Tắt · Tham gia: Bật · Rời đi: Tắt · Tắt âm: Tắt · Tắt mic: Tắt",
         )
         self.assertEqual(values["Tự đưa bảng lên"], "Mỗi 15 phút")
 
@@ -323,7 +328,6 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
                 modal.music_volume,
                 modal.duck_level,
                 modal.tts_language,
-                modal.name_announce,
                 modal.panel_bump_minutes,
             ],
         )
@@ -421,7 +425,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         self.actions.ui_add_input.assert_not_awaited()
         self.manager.refresh.assert_not_awaited()
 
-    async def test_settings_button_opens_prefilled_modal_for_disconnected_access(self) -> None:
+    async def test_settings_button_opens_toggle_menu_for_disconnected_access(self) -> None:
         interaction = _interaction()
 
         await self.view.audio_settings.callback(interaction)
@@ -432,26 +436,88 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             2,
             connect_if_missing=True,
         )
-        interaction.response.send_modal.assert_awaited_once()
-        modal = interaction.response.send_modal.await_args.args[0]
+        interaction.response.send_modal.assert_not_awaited()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        menu = kwargs["view"]
+        self.assertIsInstance(menu, AudioSettingsMenuView)
+        self.assertEqual(kwargs["embed"].title, "Cài đặt âm thanh")
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(menu.read_song_title.label, "Đọc tên bài hát: Bật")
+        self.assertEqual(menu.read_chat.label, "Đọc tin nhắn: Tắt")
+        self.assertEqual(menu.read_sender_name.label, "Đọc tên người gửi: Tắt")
+        self.assertEqual(menu.announce_join.label, "Thông báo người tham gia: Bật")
+        self.assertEqual(menu.announce_leave.label, "Thông báo người rời đi: Tắt")
+        self.assertEqual(menu.announce_deafen.label, "Thông báo tắt âm: Tắt")
+        self.assertEqual(menu.announce_mute.label, "Thông báo tắt mic: Tắt")
+        self.assertEqual(menu.open_volume_form.label, "Âm lượng")
+        self.assertEqual(self.view.audio_settings.label, "Cài đặt âm thanh")
+        self.assertEqual(
+            self.view.audio_settings.style,
+            discord.ButtonStyle.secondary,
+        )
+        rows = {
+            row: sum(child.row == row for child in menu.children)
+            for row in range(4)
+        }
+        self.assertEqual(rows, {0: 3, 1: 2, 2: 2, 3: 1})
+
+    async def test_volume_button_opens_prefilled_modal(self) -> None:
+        interaction = _interaction()
+        await self.view.audio_settings.callback(interaction)
+        menu = interaction.response.send_message.await_args.kwargs["view"]
+        volume_interaction = _interaction()
+
+        await menu.open_volume_form.callback(volume_interaction)
+
+        volume_interaction.response.send_modal.assert_awaited_once()
+        modal = volume_interaction.response.send_modal.await_args.args[0]
         self.assertIsInstance(modal, AudioSettingsModal)
+        self.assertEqual(modal.title, "Âm lượng và ngôn ngữ")
         self.assertEqual(modal.timeout, 120.0)
         self.assertEqual(modal.music_volume.default, "70")
         self.assertEqual(modal.duck_level.default, "20")
         self.assertEqual(modal.tts_language.default, "vi")
         self.assertEqual(modal.panel_bump_minutes.default, "15")
-        self.assertEqual(modal.name_announce.placeholder, "on hoặc off")
-        self.assertEqual(modal.name_announce.default, "off")
-        self.actions.current_audio_settings = GuildAudioSettings(0.7, 0.2, "vi", True)
-        on_interaction = _interaction()
-        await self.view.audio_settings.callback(on_interaction)
-        on_modal = on_interaction.response.send_modal.await_args.args[0]
-        self.assertEqual(on_modal.name_announce.default, "on")
-        self.assertEqual(self.view.audio_settings.label, "Cài đặt")
+
+    async def test_audio_menu_toggle_updates_the_button_and_refreshes_panel(self) -> None:
+        interaction = _interaction()
+        await self.view.audio_settings.callback(interaction)
+        menu = interaction.response.send_message.await_args.kwargs["view"]
+
+        async def turn_join_off(
+            _interaction: object,
+            _guild_id: int,
+            _channel_id: int,
+            kind: str,
+        ) -> str:
+            self.assertEqual(kind, "join")
+            current = self.actions.current_audio_settings
+            self.actions.current_audio_settings = GuildAudioSettings(
+                current.music_volume,
+                current.duck_level,
+                current.tts_language,
+                current.name_announce,
+                announce_join=False,
+            )
+            return "Đã tắt thông báo người tham gia."
+
+        self.actions.ui_toggle_voice_notice.side_effect = turn_join_off
+        click = _interaction()
+
+        await menu.announce_join.callback(click)
+
+        click.response.defer.assert_awaited_once()
+        edited = click.edit_original_response.await_args.kwargs
+        self.assertEqual(edited["content"], "Đã tắt thông báo người tham gia.")
         self.assertEqual(
-            self.view.audio_settings.style,
+            edited["view"].announce_join.label,
+            "Thông báo người tham gia: Tắt",
+        )
+        self.assertEqual(
+            edited["view"].announce_join.style,
             discord.ButtonStyle.secondary,
         )
+        self.manager.refresh.assert_awaited_with(1)
 
     async def test_settings_button_denial_does_not_open_modal(self) -> None:
         self.actions.ui_ensure_panel_access.return_value = False
@@ -498,15 +564,19 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         self.manager.refresh.assert_not_awaited()
 
     async def test_settings_modal_submits_normalized_values_ephemerally(self) -> None:
-        modal = AudioSettingsModal(
-            self.view,
-            self.actions.current_audio_settings,
+        current = GuildAudioSettings(
+            0.7,
+            0.2,
+            "vi",
+            False,
+            announce_join=False,
+            announce_mute=True,
         )
+        modal = AudioSettingsModal(self.view, current)
         modal.music_volume._value = " 125,5% "
         modal.duck_level._value = "20.25%"
         modal.tts_language._value = " ZH_tw "
         modal.panel_bump_minutes._value = " 45 "
-        modal.name_announce._value = " tắt "
         interaction = _interaction()
 
         await modal.on_submit(interaction)
@@ -522,7 +592,14 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             interaction,
             1,
             2,
-            GuildAudioSettings(1.255, 0.2025, "zh-TW", False),
+            GuildAudioSettings(
+                1.255,
+                0.2025,
+                "zh-TW",
+                False,
+                announce_join=False,
+                announce_mute=True,
+            ),
             45,
         )
         interaction.followup.send.assert_awaited_once_with(
@@ -543,8 +620,14 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
 
         await self.view.audio_settings.callback(open_interaction)
 
-        open_interaction.response.send_modal.assert_awaited_once()
-        modal = open_interaction.response.send_modal.await_args.args[0]
+        menu = open_interaction.response.send_message.await_args.kwargs["view"]
+        self.assertTrue(menu.read_song_title.disabled)
+        self.assertTrue(menu.announce_join.disabled)
+        self.assertFalse(menu.open_volume_form.disabled)
+        volume_interaction = _interaction()
+        await menu.open_volume_form.callback(volume_interaction)
+        volume_interaction.response.send_modal.assert_awaited_once()
+        modal = volume_interaction.response.send_modal.await_args.args[0]
         self.assertIsInstance(modal, AudioSettingsModal)
         self.assertEqual(
             modal.children,
@@ -584,18 +667,16 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_settings_modal_is_atomic_and_ephemeral(self) -> None:
         cases = (
-            ("NaN", "20", "vi", "off", "0", "Âm lượng nhạc"),
-            ("70", "101%", "vi", "off", "0", "khi TTS"),
-            ("70", "20", "không-có", "off", "0", "Mã ngôn ngữ TTS"),
-            ("70", "20", "vi", "maybe", "0", "Đọc tên người gửi"),
-            ("70", "20", "vi", "off", "1.5", "0 hoặc số phút"),
+            ("NaN", "20", "vi", "0", "Âm lượng nhạc"),
+            ("70", "101%", "vi", "0", "khi TTS"),
+            ("70", "20", "không-có", "0", "Mã ngôn ngữ TTS"),
+            ("70", "20", "vi", "1.5", "0 hoặc số phút"),
         )
-        for music, duck, language, announce, bump_minutes, expected_message in cases:
+        for music, duck, language, bump_minutes, expected_message in cases:
             with self.subTest(
                 music=music,
                 duck=duck,
                 language=language,
-                announce=announce,
                 bump_minutes=bump_minutes,
             ):
                 modal = AudioSettingsModal(
@@ -605,7 +686,6 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 modal.music_volume._value = music
                 modal.duck_level._value = duck
                 modal.tts_language._value = language
-                modal.name_announce._value = announce
                 modal.panel_bump_minutes._value = bump_minutes
                 interaction = _interaction()
 
@@ -1439,7 +1519,8 @@ class PanelManagerTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in edited_embed.fields}
         self.assertEqual(
             values["Cài đặt âm thanh"],
-            "Nhạc: 110% · Nhạc còn lại khi TTS: 40% · TTS: ja · Đọc tên: Tắt",
+            "Nhạc: 110% · Nhạc còn lại khi TTS: 40% · TTS: ja · "
+            "Đọc tên: Tắt · Tham gia: Bật · Rời đi: Tắt · Tắt âm: Tắt · Tắt mic: Tắt",
         )
         replacement = manager.get(1)
         self.assertEqual(replacement.view.toggle_title_reading.label, "Đọc tên bài: Tắt")

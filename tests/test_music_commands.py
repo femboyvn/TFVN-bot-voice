@@ -29,6 +29,9 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.players = Mock()
         self.players.add_state_listener = Mock()
         self.players.remove = AsyncMock()
+        self.players.audio_settings = Mock(
+            return_value=GuildAudioSettings(0.7, 0.2, "vi")
+        )
         self.sessions = Mock()
         self.sessions.get.return_value = None
         self.soundboard = Mock()
@@ -467,7 +470,7 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.cog.music_ui.refresh.assert_awaited_once_with(1)
         self.cog.music_ui.drop_if_channel.assert_not_awaited()
 
-    async def test_human_join_schedules_only_the_display_name(self) -> None:
+    async def test_human_join_schedules_joined_phrase(self) -> None:
         self.bot.user = Mock(id=55)
         self.cog._schedule_join_announcement = Mock()
         member = Mock()
@@ -482,7 +485,9 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.on_voice_state_update(member, before, after)
 
-        self.cog._schedule_join_announcement.assert_called_once_with(1, 7, "Lan")
+        self.cog._schedule_join_announcement.assert_called_once_with(
+            1, 7, "Lan đã tham gia",
+        )
         self.sessions.stop.assert_not_called()
 
     async def test_human_leave_does_not_announce_a_name(self) -> None:
@@ -497,6 +502,140 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         before.channel = Mock(id=7)
         after = Mock()
         after.channel = None
+
+        await self.cog.on_voice_state_update(member, before, after)
+
+        self.cog._schedule_join_announcement.assert_not_called()
+
+    async def test_enabled_leave_mute_and_deafen_are_scheduled(self) -> None:
+        self.bot.user = Mock(id=55)
+        self.cog._schedule_join_announcement = Mock()
+        self.players.audio_settings.return_value = GuildAudioSettings(
+            0.7,
+            0.2,
+            "vi",
+            announce_leave=True,
+            announce_mute=True,
+            announce_deafen=True,
+        )
+        member = Mock()
+        member.id = 9
+        member.bot = False
+        member.display_name = "Lan"
+        member.guild = self.ctx.guild
+
+        leave_before = Mock()
+        leave_before.channel = Mock(id=7)
+        leave_after = Mock()
+        leave_after.channel = None
+        await self.cog.on_voice_state_update(member, leave_before, leave_after)
+        self.cog._schedule_join_announcement.assert_called_with(1, 7, "Lan đã rời đi")
+
+        move_before = Mock()
+        move_before.channel = Mock(id=7)
+        move_after = Mock()
+        move_after.channel = Mock(id=9)
+        await self.cog.on_voice_state_update(member, move_before, move_after)
+        self.cog._schedule_join_announcement.assert_called_with(1, 7, "Lan đã rời đi")
+
+        mute_before = Mock()
+        mute_before.channel = Mock(id=7)
+        mute_before.self_mute = False
+        mute_before.mute = False
+        mute_before.self_deaf = False
+        mute_before.deaf = False
+        mute_after = Mock()
+        mute_after.channel = Mock(id=7)
+        mute_after.self_mute = True
+        mute_after.mute = False
+        mute_after.self_deaf = True
+        mute_after.deaf = False
+        await self.cog.on_voice_state_update(member, mute_before, mute_after)
+        self.cog._schedule_join_announcement.assert_called_with(
+            1, 7, "Lan đã tắt âm",
+        )
+
+        unmute_before = Mock()
+        unmute_before.channel = Mock(id=7)
+        unmute_before.self_mute = True
+        unmute_before.mute = False
+        unmute_before.self_deaf = False
+        unmute_before.deaf = False
+        unmute_after = Mock()
+        unmute_after.channel = Mock(id=7)
+        unmute_after.self_mute = False
+        unmute_after.mute = False
+        unmute_after.self_deaf = False
+        unmute_after.deaf = False
+        await self.cog.on_voice_state_update(member, unmute_before, unmute_after)
+        self.cog._schedule_join_announcement.assert_called_with(
+            1, 7, "Lan đã bật mic",
+        )
+
+        undeafen_before = Mock()
+        undeafen_before.channel = Mock(id=7)
+        undeafen_before.self_mute = True
+        undeafen_before.mute = False
+        undeafen_before.self_deaf = True
+        undeafen_before.deaf = False
+        undeafen_after = Mock()
+        undeafen_after.channel = Mock(id=7)
+        undeafen_after.self_mute = False
+        undeafen_after.mute = False
+        undeafen_after.self_deaf = False
+        undeafen_after.deaf = False
+        await self.cog.on_voice_state_update(member, undeafen_before, undeafen_after)
+        self.cog._schedule_join_announcement.assert_called_with(
+            1, 7, "Lan đã bật âm",
+        )
+
+        server_mute_before = Mock()
+        server_mute_before.channel = Mock(id=7)
+        server_mute_before.self_mute = False
+        server_mute_before.mute = False
+        server_mute_before.self_deaf = False
+        server_mute_before.deaf = False
+        server_mute_after = Mock()
+        server_mute_after.channel = Mock(id=7)
+        server_mute_after.self_mute = False
+        server_mute_after.mute = True
+        server_mute_after.self_deaf = False
+        server_mute_after.deaf = False
+        await self.cog.on_voice_state_update(
+            member, server_mute_before, server_mute_after,
+        )
+        self.cog._schedule_join_announcement.assert_called_with(
+            1, 7, "Lan đã bị nhét giẻ vào mồm",
+        )
+
+        server_deafen_after = Mock()
+        server_deafen_after.channel = Mock(id=7)
+        server_deafen_after.self_mute = False
+        server_deafen_after.mute = True
+        server_deafen_after.self_deaf = False
+        server_deafen_after.deaf = True
+        await self.cog.on_voice_state_update(
+            member, server_mute_before, server_deafen_after,
+        )
+        self.cog._schedule_join_announcement.assert_called_with(
+            1, 7, "Lan đã bị đấm thủng lỗ tai",
+        )
+
+    async def test_disabled_join_notice_stays_silent(self) -> None:
+        self.bot.user = Mock(id=55)
+        self.cog._schedule_join_announcement = Mock()
+        self.players.audio_settings.return_value = GuildAudioSettings(
+            0.7, 0.2, "vi", announce_join=False,
+        )
+        member = Mock()
+        member.id = 9
+        member.bot = False
+        member.display_name = "Lan"
+        member.guild = self.ctx.guild
+        before = Mock()
+        before.channel = None
+        after = Mock()
+        after.channel = Mock(id=7)
 
         await self.cog.on_voice_state_update(member, before, after)
 
@@ -1096,6 +1235,37 @@ class StopVsLeaveTests(unittest.IsolatedAsyncioTestCase):
         )
         sent = self.ctx.send.await_args.args[0]
         self.assertIn("tắt", sent.lower())
+
+    async def test_voice_notice_toggle_preserves_other_audio_settings(self) -> None:
+        interaction = self._make_panel_interaction()
+        current = GuildAudioSettings(
+            0.7,
+            0.2,
+            "vi",
+            True,
+            announce_join=True,
+            announce_mute=True,
+        )
+        updated = GuildAudioSettings(
+            0.7,
+            0.2,
+            "vi",
+            True,
+            announce_join=False,
+            announce_mute=True,
+        )
+        session = Mock()
+        session.active = True
+        session.set_name_announce = Mock()
+        self.sessions.get.return_value = session
+        self.players.audio_settings = Mock(return_value=current)
+        self.players.set_audio_settings = Mock(return_value=updated)
+
+        result = await self.cog.ui_toggle_voice_notice(interaction, 1, 7, "join")
+
+        self.players.set_audio_settings.assert_called_once_with(1, updated)
+        session.set_name_announce.assert_not_called()
+        self.assertEqual(result, "Đã tắt thông báo người tham gia.")
 
     async def test_jump_converts_timestamp_and_restarts_current_track(self) -> None:
         player = Mock()

@@ -1423,7 +1423,34 @@ class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):
             GuildAudioSettings(0.9, 0.4, " EN ", False),
         )
         self.assertEqual(applied, GuildAudioSettings(0.9, 0.4, "en", False))
-        self.assertEqual(manager.audio_settings(201), applied)
+        self.assertTrue(applied.announce_join)
+        self.assertFalse(applied.announce_leave)
+        flagged = manager.set_audio_settings(
+            201,
+            GuildAudioSettings(
+                0.9,
+                0.4,
+                "en",
+                False,
+                announce_join=False,
+                announce_leave=True,
+                announce_mute=True,
+            ),
+        )
+        self.assertEqual(
+            flagged,
+            GuildAudioSettings(
+                0.9,
+                0.4,
+                "en",
+                False,
+                announce_join=False,
+                announce_leave=True,
+                announce_mute=True,
+            ),
+        )
+        self.assertEqual(manager.audio_settings(201), flagged)
+        applied = flagged
         self.assertEqual(
             manager.audio_settings(202),
             GuildAudioSettings(0.5, 0.2, "vi"),

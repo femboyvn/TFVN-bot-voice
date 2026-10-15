@@ -12,7 +12,7 @@ import contextlib
 import logging
 import math
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol, Sequence
 
 import discord
@@ -130,13 +130,21 @@ def format_panel_bump_interval(minutes: int) -> str:
     return "Tắt" if minutes == 0 else f"Mỗi {minutes} phút"
 
 
+def _on_off(enabled: bool) -> str:
+    return "Bật" if enabled else "Tắt"
+
+
 def format_audio_settings(settings: GuildAudioSettings) -> str:
     """Render shared audio settings for embeds and confirmations."""
     return (
         f"Nhạc: {_format_percentage(settings.music_volume)}% · "
         f"Nhạc còn lại khi TTS: {_format_percentage(settings.duck_level)}% · "
         f"TTS: {settings.tts_language} · "
-        f"Đọc tên: {'Bật' if settings.name_announce else 'Tắt'}"
+        f"Đọc tên: {_on_off(settings.name_announce)} · "
+        f"Tham gia: {_on_off(settings.announce_join)} · "
+        f"Rời đi: {_on_off(settings.announce_leave)} · "
+        f"Tắt âm: {_on_off(settings.announce_deafen)} · "
+        f"Tắt mic: {_on_off(settings.announce_mute)}"
     )
 
 
@@ -280,6 +288,14 @@ class MusicUIActions(Protocol):
 
     async def ui_toggle_chat_reading(
         self, interaction: discord.Interaction, guild_id: int, voice_channel_id: int
+    ) -> str: ...
+
+    async def ui_toggle_voice_notice(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        kind: str,
     ) -> str: ...
 
     async def ui_leave(
@@ -701,7 +717,7 @@ class JumpModal(discord.ui.Modal, title="Tua đến"):
         await view.manager.refresh(view.guild_id)
 
 
-class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
+class AudioSettingsModal(discord.ui.Modal, title="Âm lượng và ngôn ngữ"):
     music_volume = discord.ui.TextInput(
         label="Âm lượng nhạc (%)",
         placeholder="0–200; ví dụ: 70",
@@ -719,12 +735,6 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
         placeholder="Ví dụ: vi, en, ja, ko",
         required=True,
         max_length=20,
-    )
-    name_announce = discord.ui.TextInput(
-        label="Đọc tên người gửi",
-        placeholder="on hoặc off",
-        required=True,
-        max_length=16,
     )
     panel_bump_minutes = discord.ui.TextInput(
         label="Đưa bảng lên lại (phút)",
@@ -748,12 +758,10 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
         self.music_volume.default = _format_percentage(settings.music_volume)
         self.duck_level.default = _format_percentage(settings.duck_level)
         self.tts_language.default = settings.tts_language
-        self.name_announce.default = format_name_announce(settings.name_announce)
         self.panel_bump_minutes.default = str(panel_bump_minutes)
         if not tts_available:
             self.remove_item(self.duck_level)
             self.remove_item(self.tts_language)
-            self.remove_item(self.name_announce)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         view = self.panel_view
@@ -765,22 +773,28 @@ class AudioSettingsModal(discord.ui.Modal, title="Cài đặt bảng nhạc"):
                 str(self.panel_bump_minutes)
             )
             if self.tts_available:
-                settings = parse_audio_settings(
+                parsed = parse_audio_settings(
                     str(self.music_volume),
                     str(self.duck_level),
                     str(self.tts_language),
-                    str(self.name_announce),
+                    format_name_announce(self.current_settings.name_announce),
+                )
+                # The on/off buttons own these flags. The form must not reset them.
+                settings = replace(
+                    parsed,
+                    announce_join=self.current_settings.announce_join,
+                    announce_leave=self.current_settings.announce_leave,
+                    announce_deafen=self.current_settings.announce_deafen,
+                    announce_mute=self.current_settings.announce_mute,
                 )
             else:
-                settings = GuildAudioSettings(
+                settings = replace(
+                    self.current_settings,
                     music_volume=_parse_percentage(
                         str(self.music_volume),
                         maximum=200.0,
                         error="Âm lượng nhạc phải là số từ 0 đến 200.",
                     ),
-                    duck_level=self.current_settings.duck_level,
-                    tts_language=self.current_settings.tts_language,
-                    name_announce=self.current_settings.name_announce,
                 )
         except AudioSettingsValidationError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
@@ -985,6 +999,231 @@ class ClearQueueConfirmation(_RequesterView):
         self.stop()
         _disable(self)
         await interaction.response.edit_message(content="Đã hủy.", view=self)
+
+
+def _toggle_label(title: str, enabled: bool) -> str:
+    return f"{title}: {_on_off(enabled)}"
+
+
+class AudioSettingsMenuView(_RequesterView):
+    """Private on/off controls opened from the music panel."""
+
+    def __init__(self, panel: MusicPanelView, requester_id: int) -> None:
+        super().__init__(requester_id, timeout=SEARCH_VIEW_TIMEOUT)
+        self.panel = panel
+        self.sync()
+
+    def sync(self) -> None:
+        actions = self.panel.actions
+        guild_id = self.panel.guild_id
+        settings = actions.ui_audio_settings(guild_id)
+        tts_available = actions.ui_tts_available()
+        self._set_toggle(
+            self.read_song_title,
+            "Đọc tên bài hát",
+            actions.ui_title_reading_enabled(guild_id),
+            tts_available,
+        )
+        self._set_toggle(
+            self.read_chat,
+            "Đọc tin nhắn",
+            actions.ui_chat_reading_enabled(guild_id),
+            tts_available,
+        )
+        self._set_toggle(
+            self.read_sender_name,
+            "Đọc tên người gửi",
+            settings.name_announce,
+            tts_available,
+        )
+        self._set_toggle(
+            self.announce_join,
+            "Thông báo người tham gia",
+            settings.announce_join,
+            tts_available,
+        )
+        self._set_toggle(
+            self.announce_leave,
+            "Thông báo người rời đi",
+            settings.announce_leave,
+            tts_available,
+        )
+        self._set_toggle(
+            self.announce_deafen,
+            "Thông báo tắt âm",
+            settings.announce_deafen,
+            tts_available,
+        )
+        self._set_toggle(
+            self.announce_mute,
+            "Thông báo tắt mic",
+            settings.announce_mute,
+            tts_available,
+        )
+
+    @staticmethod
+    def _set_toggle(
+        button: discord.ui.Button,
+        title: str,
+        enabled: bool,
+        tts_available: bool,
+    ) -> None:
+        button.label = _toggle_label(title, enabled)
+        button.style = (
+            discord.ButtonStyle.success
+            if enabled
+            else discord.ButtonStyle.secondary
+        )
+        button.disabled = not tts_available
+
+    def render_embed(self) -> discord.Embed:
+        return discord.Embed(
+            title="Cài đặt âm thanh",
+            description=(
+                "Bấm một nút để bật hoặc tắt. Cài đặt dùng chung cho máy chủ "
+                "và mất khi bot khởi động lại.\n"
+                "Tham gia đọc `Tên đã tham gia`. Rời đi đọc `Tên đã rời đi`. "
+                "Tự tắt âm đọc `Tên đã tắt âm` hoặc `Tên đã bật âm`. "
+                "Server deafen đọc `Tên đã bị đấm thủng lỗ tai`. "
+                "Tự tắt mic đọc `Tên đã tắt mic` hoặc `Tên đã bật mic`. "
+                "Server mute đọc `Tên đã bị nhét giẻ vào mồm`. "
+                "Âm và mic cùng nguồn đổi cùng lúc thì chỉ đọc câu âm."
+            ),
+            color=discord.Color.blurple(),
+        )
+
+    async def _toggle(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        *,
+        kind: str | None = None,
+    ) -> None:
+        panel = self.panel
+        if not await panel.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.defer()
+        if kind is None:
+            message = await getattr(panel.actions, action)(
+                interaction,
+                panel.guild_id,
+                panel.voice_channel_id,
+            )
+        else:
+            message = await panel.actions.ui_toggle_voice_notice(
+                interaction,
+                panel.guild_id,
+                panel.voice_channel_id,
+                kind,
+            )
+        self.sync()
+        await interaction.edit_original_response(
+            content=message,
+            embed=self.render_embed(),
+            view=self,
+        )
+        await panel.manager.refresh(panel.guild_id)
+
+    @discord.ui.button(label="Đọc tên bài hát: Bật", style=discord.ButtonStyle.success, row=0)
+    async def read_song_title(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_title_reading")
+
+    @discord.ui.button(label="Đọc tin nhắn: Tắt", style=discord.ButtonStyle.secondary, row=0)
+    async def read_chat(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_chat_reading")
+
+    @discord.ui.button(
+        label="Đọc tên người gửi: Tắt",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def read_sender_name(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_voice_notice", kind="name")
+
+    @discord.ui.button(
+        label="Thông báo người tham gia: Bật",
+        style=discord.ButtonStyle.success,
+        row=1,
+    )
+    async def announce_join(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_voice_notice", kind="join")
+
+    @discord.ui.button(
+        label="Thông báo người rời đi: Tắt",
+        style=discord.ButtonStyle.secondary,
+        row=1,
+    )
+    async def announce_leave(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_voice_notice", kind="leave")
+
+    @discord.ui.button(
+        label="Thông báo tắt âm: Tắt",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def announce_deafen(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_voice_notice", kind="deafen")
+
+    @discord.ui.button(
+        label="Thông báo tắt mic: Tắt",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def announce_mute(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        await self._toggle(interaction, "ui_toggle_voice_notice", kind="mute")
+
+    @discord.ui.button(
+        label="Âm lượng",
+        emoji="🎚️",
+        style=discord.ButtonStyle.secondary,
+        row=3,
+    )
+    async def open_volume_form(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        panel = self.panel
+        if not await panel.ensure_access(interaction, connect_if_missing=True):
+            return
+        await interaction.response.send_modal(
+            AudioSettingsModal(
+                panel,
+                panel.actions.ui_audio_settings(panel.guild_id),
+                tts_available=panel.actions.ui_tts_available(),
+                panel_bump_minutes=panel.manager.bump_interval_minutes(
+                    panel.guild_id
+                ),
+            )
+        )
 
 
 class MusicPanelView(discord.ui.View):
@@ -1212,7 +1451,7 @@ class MusicPanelView(discord.ui.View):
         )
 
     @discord.ui.button(
-        label="Cài đặt",
+        label="Cài đặt âm thanh",
         emoji="⚙️",
         style=discord.ButtonStyle.secondary,
         row=2,
@@ -1224,16 +1463,14 @@ class MusicPanelView(discord.ui.View):
     ) -> None:
         if not await self.ensure_access(interaction, connect_if_missing=True):
             return
-        await interaction.response.send_modal(
-            AudioSettingsModal(
-                self,
-                self.actions.ui_audio_settings(self.guild_id),
-                tts_available=self.actions.ui_tts_available(),
-                panel_bump_minutes=self.manager.bump_interval_minutes(
-                    self.guild_id
-                ),
-            )
+        view = AudioSettingsMenuView(self, interaction.user.id)
+        message = await _send_ephemeral(
+            interaction,
+            "Bật hoặc tắt một mục bên dưới.",
+            view=view,
+            embed=view.render_embed(),
         )
+        view.message = message
 
     @discord.ui.button(
         label="Rời",

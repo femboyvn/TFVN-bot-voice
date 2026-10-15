@@ -107,6 +107,10 @@ class HelpCopyTests(unittest.TestCase):
         self.assertIn("Đọc tên người gửi", settings)
         self.assertIn("`on` hoặc `off`", settings)
         self.assertIn("mặc định `off`", settings)
+        self.assertIn("Thông báo người tham gia", settings)
+        self.assertIn("Thông báo người rời đi", settings)
+        self.assertIn("Thông báo tắt âm", settings)
+        self.assertIn("Thông báo tắt mic", settings)
 
     def test_every_command_help_embed_fits_discord_limits(self) -> None:
         for name in COMMAND_HELP:

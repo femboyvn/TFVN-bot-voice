@@ -15,6 +15,7 @@ from src.session import (
     join_announcement_name,
     prepare_chat_speech,
     sanitize_for_speech,
+    voice_event_announcement,
 )
 from src.tts import TextToSpeech
 
@@ -51,7 +52,7 @@ class ChatFilterTests(unittest.TestCase):
 
 
 class JoinAnnouncementTests(unittest.TestCase):
-    def test_join_announces_only_the_display_name(self) -> None:
+    def test_join_announces_name_and_joined_phrase(self) -> None:
         self.assertEqual(
             join_announcement_name(
                 member_is_bot=False,
@@ -60,10 +61,10 @@ class JoinAnnouncementTests(unittest.TestCase):
                 bot_channel_id=7,
                 display_name="Lan",
             ),
-            "Lan",
+            "Lan đã tham gia",
         )
 
-    def test_move_into_bot_room_announces_only_the_name(self) -> None:
+    def test_move_into_bot_room_announces_joined_phrase(self) -> None:
         self.assertEqual(
             join_announcement_name(
                 member_is_bot=False,
@@ -72,7 +73,7 @@ class JoinAnnouncementTests(unittest.TestCase):
                 bot_channel_id=7,
                 display_name="Minh",
             ),
-            "Minh",
+            "Minh đã tham gia",
         )
 
     def test_leave_mute_other_room_and_bots_stay_silent(self) -> None:
@@ -109,6 +110,201 @@ class JoinAnnouncementTests(unittest.TestCase):
             join_announcement_name(
                 **{**silent, "before_channel_id": None, "bot_channel_id": None}
             )
+        )
+
+
+class VoiceEventAnnouncementTests(unittest.TestCase):
+    def _event(self, **overrides: object) -> str | None:
+        base = dict(
+            member_is_bot=False,
+            before_channel_id=7,
+            after_channel_id=7,
+            bot_channel_id=7,
+            display_name="Lan",
+            before_self_muted=False,
+            after_self_muted=False,
+            before_server_muted=False,
+            after_server_muted=False,
+            before_self_deafened=False,
+            after_self_deafened=False,
+            before_server_deafened=False,
+            after_server_deafened=False,
+            announce_join=True,
+            announce_leave=False,
+            announce_mute=False,
+            announce_deafen=False,
+        )
+        base.update(overrides)
+        return voice_event_announcement(**base)
+
+    def test_leave_join_mute_and_deafen_use_their_phrases(self) -> None:
+        self.assertEqual(
+            self._event(before_channel_id=7, after_channel_id=None, announce_leave=True),
+            "Lan đã rời đi",
+        )
+        self.assertEqual(
+            self._event(before_channel_id=None, after_channel_id=7),
+            "Lan đã tham gia",
+        )
+        self.assertEqual(
+            self._event(after_self_muted=True, announce_mute=True),
+            "Lan đã tắt mic",
+        )
+        self.assertEqual(
+            self._event(after_self_deafened=True, announce_deafen=True),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                announce_mute=True,
+            ),
+            "Lan đã bật mic",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_deafened=True,
+                after_self_deafened=False,
+                before_self_muted=True,
+                after_self_muted=False,
+                announce_deafen=True,
+                announce_mute=True,
+            ),
+            "Lan đã bật âm",
+        )
+
+    def test_disabled_notices_and_unchanged_flags_stay_silent(self) -> None:
+        self.assertIsNone(
+            self._event(before_channel_id=7, after_channel_id=None)
+        )
+        self.assertIsNone(
+            self._event(
+                before_channel_id=None,
+                after_channel_id=7,
+                announce_join=False,
+            )
+        )
+        self.assertIsNone(self._event(after_self_muted=True))
+        self.assertIsNone(
+            self._event(before_self_muted=True, after_self_muted=False, announce_mute=False)
+        )
+        self.assertIsNone(
+            self._event(
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_deafen=False,
+            )
+        )
+        self.assertIsNone(
+            self._event(after_self_deafened=True, announce_deafen=False)
+        )
+        self.assertIsNone(
+            self._event(
+                before_channel_id=3,
+                after_channel_id=4,
+                after_self_muted=True,
+                announce_mute=True,
+            )
+        )
+
+    def test_mute_and_deafen_together_announce_only_deafen(self) -> None:
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=False,
+                announce_deafen=True,
+            ),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=True,
+                announce_deafen=False,
+            ),
+            "Lan đã tắt mic",
+        )
+
+    def test_unmute_and_undeafen_together_announce_only_sound(self) -> None:
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã bật âm",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_mute=True,
+                announce_deafen=False,
+            ),
+            "Lan đã bật mic",
+        )
+
+    def test_joining_already_muted_does_not_announce_mute(self) -> None:
+        self.assertEqual(
+            self._event(
+                before_channel_id=None,
+                after_channel_id=7,
+                before_self_muted=False,
+                after_self_muted=True,
+                announce_mute=True,
+            ),
+            "Lan đã tham gia",
+        )
+
+    def test_server_mute_and_deafen_use_separate_phrases(self) -> None:
+        self.assertEqual(
+            self._event(after_server_muted=True, announce_mute=True),
+            "Lan đã bị nhét giẻ vào mồm",
+        )
+        self.assertEqual(
+            self._event(after_server_deafened=True, announce_deafen=True),
+            "Lan đã bị đấm thủng lỗ tai",
+        )
+        self.assertEqual(
+            self._event(
+                after_server_muted=True,
+                after_server_deafened=True,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã bị đấm thủng lỗ tai",
+        )
+        self.assertIsNone(
+            self._event(
+                before_server_muted=True,
+                after_server_muted=False,
+                announce_mute=True,
+            )
+        )
+        self.assertEqual(
+            self._event(
+                after_server_muted=True,
+                after_self_muted=True,
+                announce_mute=True,
+            ),
+            "Lan đã bị nhét giẻ vào mồm. Lan đã tắt mic",
         )
 
 

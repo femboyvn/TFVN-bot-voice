@@ -10,6 +10,7 @@ import contextlib
 import logging
 import shlex
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -52,7 +53,7 @@ from ..playlists import (
     PlaylistStore,
     SavedPlaylist,
 )
-from ..session import SessionManager, join_announcement_name
+from ..session import SessionManager, voice_event_announcement
 from ..soundboard import (
     InstantHit,
     SoundboardEntry,
@@ -80,6 +81,23 @@ from ..voice import (
 )
 
 log = logging.getLogger(__name__)
+
+# kind -> (GuildAudioSettings field, Vietnamese confirmation label)
+_VOICE_NOTICE_FIELDS: dict[str, tuple[str, str]] = {
+    "name": ("name_announce", "đọc tên người gửi"),
+    "join": ("announce_join", "thông báo người tham gia"),
+    "leave": ("announce_leave", "thông báo người rời đi"),
+    "deafen": ("announce_deafen", "thông báo tắt âm"),
+    "mute": ("announce_mute", "thông báo tắt mic"),
+}
+
+
+def _voice_flag(state: discord.VoiceState, name: str) -> bool:
+    """True only for an explicit Discord voice-state flag.
+
+    Missing attributes stay false. A truthy stand-in must not count as muted.
+    """
+    return getattr(state, name, False) is True
 
 
 class MusicCog(commands.Cog, name="Music"):
@@ -460,12 +478,7 @@ class MusicCog(commands.Cog, name="Music"):
             if current.name_announce != enabled:
                 self.players.set_audio_settings(
                     ctx.guild.id,
-                    GuildAudioSettings(
-                        music_volume=current.music_volume,
-                        duck_level=current.duck_level,
-                        tts_language=current.tts_language,
-                        name_announce=enabled,
-                    ),
+                    replace(current, name_announce=enabled),
                 )
         if enabled:
             await ctx.send(
@@ -755,8 +768,8 @@ class MusicCog(commands.Cog, name="Music"):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """Release a vanished voice room and speak the name of a human who joins."""
-        self._note_member_join(member, before, after)
+        """Release a vanished voice room and announce a human presence change."""
+        self._note_member_presence(member, before, after)
         bot_user = self.bot.user
         if bot_user is None or getattr(member, "id", None) != bot_user.id:
             return
@@ -1732,6 +1745,42 @@ class MusicCog(commands.Cog, name="Music"):
 
         return "Đã bật đọc tin nhắn trong kênh thoại."
 
+    async def ui_toggle_voice_notice(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+        kind: str,
+    ) -> str:
+        """Toggle one shared spoken-presence preference and return the reply."""
+        try:
+            field_name, label = _VOICE_NOTICE_FIELDS[kind]
+        except KeyError:
+            return "Mục cài đặt này không còn hợp lệ."
+        async with self._operation_lock(guild_id):
+            error = self._interaction_access_error(
+                interaction,
+                guild_id,
+                voice_channel_id,
+                allow_disconnected=True,
+            )
+            if error:
+                return error
+            if not self.settings.tts_enabled:
+                return "TTS đã bị tắt trong cấu hình bot."
+            current = self.players.audio_settings(guild_id)
+            enabled = not bool(getattr(current, field_name))
+            applied = self.players.set_audio_settings(
+                guild_id,
+                replace(current, **{field_name: enabled}),
+            )
+            if field_name == "name_announce":
+                session = self.sessions.get(guild_id)
+                if session is not None and session.active:
+                    session.set_name_announce(applied.name_announce)
+        state = "bật" if bool(getattr(applied, field_name)) else "tắt"
+        return f"Đã {state} {label}."
+
     async def ui_leave(
         self,
         interaction: discord.Interaction,
@@ -1790,12 +1839,7 @@ class MusicCog(commands.Cog, name="Music"):
                     )
             if not self.settings.tts_enabled:
                 current = self.players.audio_settings(guild_id)
-                settings = GuildAudioSettings(
-                    music_volume=settings.music_volume,
-                    duck_level=current.duck_level,
-                    tts_language=current.tts_language,
-                    name_announce=current.name_announce,
-                )
+                settings = replace(current, music_volume=settings.music_volume)
             try:
                 applied = self.players.set_audio_settings(guild_id, settings)
             except (TypeError, ValueError):
@@ -1913,13 +1957,13 @@ class MusicCog(commands.Cog, name="Music"):
             await asyncio.gather(*announce_tasks, return_exceptions=True)
         await self.music_ui.close()
 
-    def _note_member_join(
+    def _note_member_presence(
         self,
         member: discord.Member,
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """Queue a name-only announcement when a human enters the bot's room."""
+        """Queue a spoken line when a human joins, leaves, mutes, or deafens."""
         if not self.settings.tts_enabled:
             return
         bot_user = self.bot.user
@@ -1933,16 +1977,30 @@ class MusicCog(commands.Cog, name="Music"):
             return
         before_id = getattr(getattr(before, "channel", None), "id", None)
         after_id = getattr(getattr(after, "channel", None), "id", None)
-        name = join_announcement_name(
+        bot_channel_id = live_voice_channel_id(guild)
+        settings = self.players.audio_settings(guild.id)
+        speech = voice_event_announcement(
             member_is_bot=False,
             before_channel_id=before_id if isinstance(before_id, int) else None,
             after_channel_id=after_id if isinstance(after_id, int) else None,
-            bot_channel_id=live_voice_channel_id(guild),
+            bot_channel_id=bot_channel_id,
             display_name=str(getattr(member, "display_name", "") or ""),
+            before_self_muted=_voice_flag(before, "self_mute"),
+            after_self_muted=_voice_flag(after, "self_mute"),
+            before_server_muted=_voice_flag(before, "mute"),
+            after_server_muted=_voice_flag(after, "mute"),
+            before_self_deafened=_voice_flag(before, "self_deaf"),
+            after_self_deafened=_voice_flag(after, "self_deaf"),
+            before_server_deafened=_voice_flag(before, "deaf"),
+            after_server_deafened=_voice_flag(after, "deaf"),
+            announce_join=bool(settings.announce_join),
+            announce_leave=bool(settings.announce_leave),
+            announce_mute=bool(settings.announce_mute),
+            announce_deafen=bool(settings.announce_deafen),
         )
-        if name is None or not isinstance(after_id, int):
+        if speech is None or not isinstance(bot_channel_id, int):
             return
-        self._schedule_join_announcement(guild.id, after_id, name)
+        self._schedule_join_announcement(guild.id, bot_channel_id, speech)
 
     def _schedule_join_announcement(
         self,
@@ -1963,7 +2021,7 @@ class MusicCog(commands.Cog, name="Music"):
         channel_id: int,
         name: str,
     ) -> None:
-        """Speak *name* and nothing else for a member who just joined."""
+        """Speak one presence line in the bot's current voice channel."""
         if not self.settings.tts_enabled:
             return
         guild = self.bot.get_guild(guild_id)

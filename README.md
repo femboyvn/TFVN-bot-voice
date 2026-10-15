@@ -73,7 +73,7 @@ The default prefix is `!tfd `, including the trailing space.
 4. Everyone in the bot's current voice channel can use pause/resume, previous, next
    (majority vote-skip), loop (off → track → queue), timestamp jump, queue view
    (shuffle / remove / move waiting tracks), clear queue, stop, **Đọc tên bài**,
-   **Đọc tin nhắn**, **Bảng âm thanh**, **Cài đặt**, and **Rời**. Members outside that channel,
+   **Đọc tin nhắn**, **Bảng âm thanh**, **Cài đặt âm thanh**, and **Rời**. Members outside that channel,
    including administrators, cannot use these controls or move the bot.
    **Trợ giúp** is an exception: anyone who can see the panel may open the private
    help menu. `!tfd help` opens the same menu from a text command.
@@ -85,14 +85,21 @@ The default prefix is `!tfd `, including the trailing space.
    making the bot leave voice. **Rời** is the explicit action that stops music,
    clears the queue, turns off chat reading, and disconnects. A phrase already being
    spoken may finish after either reading control is turned off.
-7. **Cài đặt** opens a private form for the room's shared runtime audio settings:
-   music volume accepts `0`–`200` percent; music level while TTS is speaking accepts
-   `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction);
-   TTS language accepts a supported gTTS language code such as `vi`, `en`, `ja`,
-   or `ko`; and **Đọc tên người gửi** accepts `on` or `off` (whether chat TTS
-   speaks `"{name} nói …"` before the message body). The same form controls
-   automatic panel bumping in whole minutes: `0` disables it, while `1`–`1440`
-   reposts the panel at that interval.
+7. **Cài đặt âm thanh** opens a private set of on/off buttons shared by the room:
+   **Đọc tên bài hát**, **Đọc tin nhắn**, **Đọc tên người gửi** (speaks
+   `"{name} nói …"`; default off), **Thông báo người tham gia** (`"{name} đã tham gia"`,
+   default on), **Thông báo người rời đi** (`"{name} đã rời đi"`, default off),
+   **Thông báo tắt âm** speaks `"{name} đã tắt âm"` or `"{name} đã bật âm"` for a
+   self-deafen, and `"{name} đã bị đấm thủng lỗ tai"` for a server deafen (default off).
+   **Thông báo tắt mic** speaks `"{name} đã tắt mic"` or `"{name} đã bật mic"` for a
+   self-mute, and `"{name} đã bị nhét giẻ vào mồm"` for a server mute (default off).
+   If mute and deafen from the same source change together, only the âm line is spoken.
+   Removing a server mute or server deafen stays silent.
+   **Âm lượng** inside that menu opens the
+   numeric form: music volume `0`–`200` percent, music level while TTS is speaking
+   `0`–`100` percent (`0` mutes the music temporarily and `100` means no reduction),
+   a gTTS language code such as `vi`, `en`, `ja`, or `ko`, and automatic panel
+   bumping in whole minutes (`0` disables it, `1`–`1440` reposts the panel).
 8. **Bảng âm thanh** (or `!tfd soundboard`) opens a room-bound picker of short
    clips saved for this Discord server. **Thêm** accepts a MyInstants page/mp3,
    a YouTube URL, a direct audio link, or a MyInstants keyword (up to five
@@ -218,9 +225,10 @@ normal rebuilds; `docker compose down -v` deletes named volumes and their data.
 2. Run `!tfd join` (in any text channel, or in the VC chat).
 3. Type in that **voice channel's text chat** — the bot speaks the message body
    (name prefix is off by default).
-   While the bot is in a voice channel, it also speaks **only the display name**
-   of each person who joins that channel. Leaving, muting, and deafening stay silent.
-4. `!tfd nameannounce on` or **Cài đặt → Đọc tên người gửi: on** speaks
+   While the bot is in a voice channel, **Thông báo người tham gia** (on by default)
+   speaks **"{display name} đã tham gia"**. **Thông báo người rời đi**, **Thông báo tắt âm**,
+   and **Thông báo tắt mic** are off until enabled in **Cài đặt âm thanh**.
+4. `!tfd nameannounce on` or **Cài đặt âm thanh → Đọc tên người gửi: Bật** speaks
    `"{display name} nói {message}"`; `off` reads only the message body. The choice
    is kept for later chat-reading sessions until the bot process restarts.
 5. Bot commands (`!tfd …`) are not read aloud.

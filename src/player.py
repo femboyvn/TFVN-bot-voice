@@ -93,6 +93,11 @@ class GuildAudioSettings:
     duck_level: float
     tts_language: str
     name_announce: bool = False
+    # Join stays on so an existing room keeps announcing arrivals.
+    announce_join: bool = True
+    announce_leave: bool = False
+    announce_deafen: bool = False
+    announce_mute: bool = False
 
 
 StateChangeListener = Callable[[int, PlayerSnapshot], Awaitable[None]]
@@ -1116,6 +1121,10 @@ class PlayerManager:
             duck_level=duck_level,
             tts_language=language,
             name_announce=bool(settings.name_announce),
+            announce_join=bool(settings.announce_join),
+            announce_leave=bool(settings.announce_leave),
+            announce_deafen=bool(settings.announce_deafen),
+            announce_mute=bool(settings.announce_mute),
         )
 
         # Commit only after every field has passed validation.
