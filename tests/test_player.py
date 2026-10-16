@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import tempfile
+import time
 import unittest
 from collections import deque
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
@@ -36,6 +38,59 @@ class _FakeAudioSource(discord.AudioSource):
 
     def cleanup(self) -> None:
         return None
+
+
+class _FiniteFrames(discord.AudioSource):
+    """A short PCM clip so a test can drain one ducked playback."""
+
+    def __init__(self, frames: int = 2) -> None:
+        self._left = frames
+
+    def read(self) -> bytes:
+        if self._left <= 0:
+            return b""
+        self._left -= 1
+        return b"\x00" * 16
+
+    def cleanup(self) -> None:
+        return None
+
+
+class _ForeverSource(discord.AudioSource):
+    def read(self) -> bytes:
+        return b"\x00" * 16
+
+    def cleanup(self) -> None:
+        return None
+
+
+class _CountingMusic(discord.AudioSource):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read(self) -> bytes:
+        self.reads += 1
+        return b"\x01\x00" * 8
+
+    def cleanup(self) -> None:
+        return None
+
+
+async def _drain_ducked_clip(mixer: DuckingAudioSource) -> None:
+    """Read the mixer until the injected clip ends.
+
+    Source construction runs on a worker thread, so this waits until the
+    secondary exists. Returning early is what made the paused-music TTS test
+    time out on a busy CI executor.
+    """
+    while not mixer.is_ducking:
+        await asyncio.sleep(0)
+    for _ in range(12):
+        await asyncio.sleep(0)
+        mixer.read()
+        if not mixer.is_ducking:
+            return
+    raise AssertionError("ducked clip did not finish")
 
 
 def _write_fake_mp3(text: str, dest: Path) -> None:
@@ -1273,6 +1328,138 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(mixer.is_primary_paused)
         self.assertEqual(music.reads, 0)
 
+    def _music_player(
+        self,
+        *,
+        paused: bool,
+        playing: bool = True,
+        synthesizer: Callable[[str, Path], None] | None = None,
+    ) -> tuple[GuildPlayer, DuckingAudioSource, _CountingMusic]:
+        music = _CountingMusic()
+        mixer = DuckingAudioSource(music, duck_level=0.2)
+        if paused:
+            mixer.pause_primary()
+        player = object.__new__(GuildPlayer)
+        player.bot = Mock()
+        player.bot.loop = asyncio.get_running_loop()
+        player.guild = Mock()
+        player.guild.id = 1
+        player.volume = 0.7
+        player.tts = TextToSpeech(synthesizer=synthesizer or _write_fake_mp3)
+        player._mixer = mixer
+        player._music_active = True
+        player._closed = False
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = playing
+        player.guild.voice_client = voice_client
+        return player, mixer, music
+
+    async def _speak_one(
+        self,
+        player: GuildPlayer,
+        mixer: DuckingAudioSource,
+        *,
+        source_factory: Callable[..., discord.AudioSource],
+        text: str = "hello world",
+    ) -> bool:
+        with patch("src.tts.discord.FFmpegPCMAudio", side_effect=source_factory):
+            pump = asyncio.create_task(_drain_ducked_clip(mixer))
+            try:
+                return await asyncio.wait_for(
+                    player.speak_over_music(text),
+                    timeout=2.0,
+                )
+            finally:
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
+                mixer.clear_secondary()
+
+    async def test_paused_speak_repeats_without_reading_primary(self) -> None:
+        player, mixer, music = self._music_player(paused=True)
+        for attempt in range(20):
+            with self.subTest(attempt=attempt):
+                ok = await self._speak_one(
+                    player,
+                    mixer,
+                    source_factory=lambda *_args, **_kwargs: _FiniteFrames(),
+                )
+                self.assertTrue(ok)
+                self.assertTrue(mixer.is_primary_paused)
+                self.assertFalse(mixer.is_ducking)
+        self.assertEqual(music.reads, 0)
+
+    async def test_paused_speak_survives_slow_synthesis_many_times(self) -> None:
+        def slow_synth(text: str, dest: Path) -> None:
+            time.sleep(0.04)
+            _write_fake_mp3(text, dest)
+
+        def slow_source(*_args, **_kwargs) -> _FiniteFrames:
+            time.sleep(0.04)
+            return _FiniteFrames()
+
+        player, mixer, music = self._music_player(
+            paused=True,
+            synthesizer=slow_synth,
+        )
+        for attempt in range(8):
+            with self.subTest(attempt=attempt):
+                ok = await self._speak_one(
+                    player,
+                    mixer,
+                    source_factory=slow_source,
+                )
+                self.assertTrue(ok)
+                self.assertTrue(mixer.is_primary_paused)
+        self.assertEqual(music.reads, 0)
+
+    async def test_speak_over_playing_music_reads_primary(self) -> None:
+        player, mixer, music = self._music_player(paused=False)
+        ok = await self._speak_one(
+            player,
+            mixer,
+            source_factory=lambda *_args, **_kwargs: _FiniteFrames(),
+        )
+        self.assertTrue(ok)
+        self.assertFalse(mixer.is_primary_paused)
+        self.assertGreater(music.reads, 0)
+        self.assertFalse(mixer.is_ducking)
+
+    async def test_speak_over_music_skips_when_not_playing(self) -> None:
+        player, mixer, music = self._music_player(paused=True, playing=False)
+        ok = await player.speak_over_music("hello world")
+        self.assertFalse(ok)
+        self.assertEqual(music.reads, 0)
+        self.assertFalse(mixer.is_ducking)
+        self.assertTrue(mixer.is_primary_paused)
+
+    async def test_speak_over_music_skips_when_synthesis_fails(self) -> None:
+        def boom(_text: str, _dest: Path) -> None:
+            raise RuntimeError("gTTS down")
+
+        player, mixer, music = self._music_player(paused=True, synthesizer=boom)
+        ok = await player.speak_over_music("hello world")
+        self.assertFalse(ok)
+        self.assertEqual(music.reads, 0)
+        self.assertTrue(mixer.is_primary_paused)
+        self.assertFalse(mixer.is_ducking)
+
+    async def test_ducked_tts_timeout_clears_clip_and_leaves_music_unread(self) -> None:
+        player, mixer, music = self._music_player(paused=True)
+        with (
+            patch("src.player.tts_playback_timeout", return_value=0.2),
+            patch("src.tts.discord.FFmpegPCMAudio", return_value=_ForeverSource()),
+        ):
+            ok = await asyncio.wait_for(
+                player.speak_over_music("hello world"),
+                timeout=2.0,
+            )
+        self.assertFalse(ok)
+        self.assertFalse(mixer.is_ducking)
+        self.assertTrue(mixer.is_primary_paused)
+        self.assertEqual(music.reads, 0)
+
 
 class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
     def _clip(self) -> Path:
@@ -1394,6 +1581,87 @@ class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
         player.guild.voice_client.is_connected.return_value = True
         missing = Path(self._tmp.name) / "nope.mp3"
         self.assertFalse(await player.play_overlay(missing, timeout=1.0))
+
+    def _overlay_player(self, mixer: DuckingAudioSource) -> GuildPlayer:
+        player = object.__new__(GuildPlayer)
+        player.bot = Mock()
+        player.bot.loop = asyncio.get_running_loop()
+        player.guild = Mock()
+        player.guild.id = 3
+        player.volume = 0.7
+        player._closed = False
+        player._mixer = mixer
+        player._music_active = True
+        voice_client = MagicMock()
+        voice_client.is_connected.return_value = True
+        voice_client.is_playing.return_value = True
+        player.guild.voice_client = voice_client
+        return player
+
+    async def _overlay_one(
+        self,
+        player: GuildPlayer,
+        mixer: DuckingAudioSource,
+        clip: Path,
+        *,
+        source_factory: Callable[..., discord.AudioSource],
+        timeout: float = 2.0,
+    ) -> bool:
+        with patch("src.player.discord.FFmpegPCMAudio", side_effect=source_factory):
+            pump = asyncio.create_task(_drain_ducked_clip(mixer))
+            try:
+                return await asyncio.wait_for(
+                    player.play_overlay(clip, timeout=timeout),
+                    timeout=2.0,
+                )
+            finally:
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
+                mixer.clear_secondary()
+
+    async def test_play_overlay_repeats_many_slow_opens(self) -> None:
+        music = _CountingMusic()
+        mixer = DuckingAudioSource(music, duck_level=0.2)
+        player = self._overlay_player(mixer)
+        clip = self._clip()
+
+        def slow_source(*_args, **_kwargs) -> _FiniteFrames:
+            time.sleep(0.02)
+            return _FiniteFrames()
+
+        for attempt in range(12):
+            with self.subTest(attempt=attempt):
+                ok = await self._overlay_one(
+                    player,
+                    mixer,
+                    clip,
+                    source_factory=slow_source,
+                )
+                self.assertTrue(ok)
+                self.assertFalse(mixer.is_ducking)
+        player.guild.voice_client.play.assert_not_called()
+        self.assertGreater(music.reads, 0)
+        self.assertTrue(clip.is_file())
+
+    async def test_play_overlay_timeout_clears_the_secondary(self) -> None:
+        music = _CountingMusic()
+        mixer = DuckingAudioSource(music, duck_level=0.2)
+        player = self._overlay_player(mixer)
+        clip = self._clip()
+        with patch(
+            "src.player.discord.FFmpegPCMAudio",
+            return_value=_ForeverSource(),
+        ):
+            ok = await asyncio.wait_for(
+                player.play_overlay(clip, timeout=0.2),
+                timeout=2.0,
+            )
+        self.assertFalse(ok)
+        self.assertFalse(mixer.is_ducking)
+        self.assertEqual(music.reads, 0)
+        player.guild.voice_client.play.assert_not_called()
+        self.assertTrue(clip.is_file())
 
 
 class PlayerIdleSessionTests(unittest.IsolatedAsyncioTestCase):
