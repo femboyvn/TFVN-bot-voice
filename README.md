@@ -51,7 +51,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |
 | `!tfd forceleave` | Administrator only. Drop the bot when it is stuck in a deleted temporary voice channel |
-| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; also in **Cài đặt**) |
+| `!tfd nameannounce on` / `off` | Toggle speaker-name prefix in chat TTS (default **off**; the same person in a row is named once; also in **Cài đặt**) |
 | `!tfd play <URL or query>` | Join voice and queue a YouTube or Spotify track/playlist |
 | `!tfd next <URL or query>` | Add another track or playlist to the queue |
 | `!tfd pause` | Pause playback |
@@ -87,7 +87,8 @@ The default prefix is `!tfd `, including the trailing space.
    spoken may finish after either reading control is turned off.
 7. **Cài đặt âm thanh** opens a private set of on/off buttons shared by the room:
    **Đọc tên bài hát**, **Đọc tin nhắn**, **Đọc tên người gửi** (speaks
-   `"{name} nói …"`; default off), **Thông báo người tham gia** (`"{name} đã tham gia"`,
+   `"{name} nói …"` when the sender changes; later messages in a row from that
+   person omit the name; default off), **Thông báo người tham gia** (`"{name} đã tham gia"`,
    default on), **Thông báo người rời đi** (`"{name} đã rời đi"`, default off),
    **Thông báo tắt âm** speaks `"{name} đã tắt âm"` or `"{name} đã bật âm"` for a
    self-deafen, and `"{name} đã bị đấm thủng lỗ tai"` for a server deafen (default off).
@@ -229,8 +230,10 @@ normal rebuilds; `docker compose down -v` deletes named volumes and their data.
    speaks **"{display name} đã tham gia"**. **Thông báo người rời đi**, **Thông báo tắt âm**,
    and **Thông báo tắt mic** are off until enabled in **Cài đặt âm thanh**.
 4. `!tfd nameannounce on` or **Cài đặt âm thanh → Đọc tên người gửi: Bật** speaks
-   `"{display name} nói {message}"`; `off` reads only the message body. The choice
-   is kept for later chat-reading sessions until the bot process restarts.
+   `"{display name} nói {message}"` when the sender changes. Later messages in a
+   row from that person are read without the name. `off` reads only the message
+   body. The choice is kept for later chat-reading sessions until the bot process
+   restarts.
 5. Bot commands (`!tfd …`) are not read aloud.
 6. `!tfd stop` stops music but **keeps** the TTS session and stays in VC.
 7. `!tfd leave` ends monitoring and disconnects.

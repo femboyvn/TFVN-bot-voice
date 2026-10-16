@@ -49,7 +49,8 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
     ),
     "nameannounce": (
         "on | off",
-        "Bật hoặc tắt đọc tên người gửi trước nội dung tin nhắn TTS.",
+        "Bật hoặc tắt đọc tên người gửi trước nội dung tin nhắn TTS. "
+        "Cùng một người nhắn liên tiếp thì chỉ đọc tên ở tin đầu.",
     ),
     "play": (
         "<URL hoặc từ khóa>",
@@ -313,8 +314,9 @@ def _build_tts(prefix: str) -> discord.Embed:
         value=(
             "Mặc định chỉ đọc nội dung tin nhắn. "
             "Bật **Đọc tên người gửi** trong **Cài đặt âm thanh**, hoặc "
-            f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …`; "
-            f"{_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
+            f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …` "
+            "khi đổi người gửi. Tin nhắn liên tiếp của cùng một người chỉ đọc "
+            f"nội dung. {_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
             "Lệnh bot (tin bắt đầu bằng tiền tố) không được đọc. "
             "**Thông báo người tham gia** (mặc định bật) đọc `Tên đã tham gia`. "
             "**Thông báo người rời đi**, **Thông báo tắt âm**, và **Thông báo tắt mic** "
@@ -352,7 +354,8 @@ def _build_settings(prefix: str) -> discord.Embed:
         value=(
             "**Đọc tên bài hát** — đọc tiêu đề khi bài mới bắt đầu. Mặc định bật khi TTS bật.\n"
             "**Đọc tin nhắn** — đọc chat của kênh thoại. Mặc định tắt.\n"
-            "**Đọc tên người gửi** — đọc `Tên nói …`. mặc định `off`. "
+            "**Đọc tên người gửi** — đọc `Tên nói …` khi đổi người gửi. "
+            "Tin liên tiếp của cùng một người chỉ đọc nội dung. Mặc định `off`. "
             f"Lệnh {_command(prefix, 'nameannounce', 'on')} cũng dùng `on` hoặc `off`.\n"
             "**Thông báo người tham gia** — đọc `Tên đã tham gia`. Mặc định bật.\n"
             "**Thông báo người rời đi** — đọc `Tên đã rời đi`. Mặc định tắt.\n"
@@ -436,6 +439,7 @@ _COMMAND_DETAILS: dict[str, str] = {
     "nameannounce": (
         "Chỉ dùng khi phiên đọc chat đang chạy. Giá trị được lưu cho máy chủ "
         "(đến khi bot khởi động lại) và dùng cho phiên sau. "
+        "Cùng một người nhắn liên tiếp thì chỉ đọc tên ở tin đầu. "
         "Cũng có trong form **Cài đặt** trên bảng. Mặc định là tắt."
     ),
     "play": (

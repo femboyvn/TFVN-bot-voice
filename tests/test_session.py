@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import unittest
 from unittest.mock import Mock
 
@@ -457,6 +458,193 @@ class VoiceSessionOfferTests(unittest.IsolatedAsyncioTestCase):
                     command_prefix="!tfd ",
                 )
             )
+        finally:
+            await session.close()
+
+    async def _quiet_session(self, *, name_announce: bool = False) -> VoiceSession:
+        """Session whose speak loop is stopped so tests can read the queue."""
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        guild = Mock()
+        guild.id = 10
+        guild.voice_client = None
+        channel = Mock()
+        channel.id = 55
+        channel.name = "General"
+        tts = TextToSpeech(synthesizer=lambda text, path: path.write_bytes(b"x" * 8))
+        session = VoiceSession(
+            bot,
+            guild,
+            channel,
+            tts,
+            volume=0.5,
+            name_announce=name_announce,
+        )
+        session._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await session._task
+        return session
+
+    def _offer(
+        self,
+        session: VoiceSession,
+        *,
+        author_id: int,
+        author_name: str,
+        content: str,
+        channel_id: int = 55,
+    ) -> bool:
+        return session.offer_chat_message(
+            author_is_bot=False,
+            author_name=author_name,
+            author_id=author_id,
+            guild_id=10,
+            channel_id=channel_id,
+            content=content,
+            command_prefix="!tfd ",
+        )
+
+    def _queued(self, session: VoiceSession) -> list[str]:
+        lines: list[str] = []
+        while True:
+            try:
+                item = session._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return lines
+            session._queue.task_done()
+            if item is not None:
+                lines.append(item)
+
+    async def test_repeat_speaker_omits_name_until_someone_else_speaks(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(
+                    session,
+                    author_id=1,
+                    author_name="Lan Mới",
+                    content="hai",
+                )
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Minh", content="ba")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="bốn")
+            )
+            self.assertEqual(
+                self._queued(session),
+                ["Lan nói một", "hai", "Minh nói ba", "Lan nói bốn"],
+            )
+        finally:
+            await session.close()
+
+    async def test_same_display_name_still_names_a_different_person(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Lan", content="hai")
+            )
+            self.assertEqual(
+                self._queued(session),
+                ["Lan nói một", "Lan nói hai"],
+            )
+        finally:
+            await session.close()
+
+    async def test_unspoken_messages_do_not_break_a_speaker_run(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertFalse(
+                self._offer(session, author_id=2, author_name="Minh", content="😂")
+            )
+            self.assertFalse(
+                self._offer(
+                    session,
+                    author_id=2,
+                    author_name="Minh",
+                    content="!tfd leave",
+                )
+            )
+            self.assertFalse(
+                self._offer(
+                    session,
+                    author_id=2,
+                    author_name="Minh",
+                    content="nghe này",
+                    channel_id=999,
+                )
+            )
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="hai")
+            )
+            self.assertEqual(self._queued(session), ["Lan nói một", "hai"])
+        finally:
+            await session.close()
+
+    async def test_name_announce_toggle_and_rebind_start_a_new_run(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(session.set_name_announce(True))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="hai")
+            )
+            self.assertFalse(session.set_name_announce(False))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="ba")
+            )
+            self.assertTrue(session.set_name_announce(True))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="bốn")
+            )
+            other = Mock()
+            other.id = 56
+            other.name = "Other"
+            session.rebind_channel(other)
+            self.assertTrue(
+                self._offer(
+                    session,
+                    author_id=1,
+                    author_name="Lan",
+                    content="năm",
+                    channel_id=56,
+                )
+            )
+            self.assertEqual(
+                self._queued(session),
+                [
+                    "Lan nói một",
+                    "hai",
+                    "ba",
+                    "Lan nói bốn",
+                    "Lan nói năm",
+                ],
+            )
+        finally:
+            await session.close()
+
+    async def test_name_announce_off_never_prefixes(self) -> None:
+        session = await self._quiet_session(name_announce=False)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Minh", content="hai")
+            )
+            self.assertEqual(self._queued(session), ["một", "hai"])
         finally:
             await session.close()
 

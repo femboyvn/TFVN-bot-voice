@@ -212,6 +212,20 @@ def join_announcement_name(
     )
 
 
+def chat_speaker_key(author_id: int | None, author_name: str) -> str | None:
+    """Identity used to skip a repeated speaker name on back-to-back chat lines.
+
+    Prefer the Discord user id. Fall back to the display name only when no id
+    is available, so two people who share a nickname still get named.
+    """
+    if author_id is not None:
+        return f"id:{author_id}"
+    name = (author_name or "").strip()
+    if not name:
+        return None
+    return f"name:{name.casefold()}"
+
+
 def prepare_chat_speech(
     content: str,
     *,
@@ -222,7 +236,8 @@ def prepare_chat_speech(
     """Build a plain-speech line for a VC chat message, or None if empty.
 
     When *announce_name* is True, speaks ``"{name} nói {message}"``.
-    When False (session default), speaks only the message body.
+    When False, speaks only the message body. The session passes False for
+    a repeat of the previous spoken chat author, and when name reading is off.
     Skips pure link / GIF / emoji messages after sanitization.
     """
     cleaned = sanitize_for_speech(content)
@@ -307,6 +322,8 @@ class VoiceSession:
         self.tts_chunk_chars = tts_chunk_chars
         # Guild default is off: speak the message body only.
         self.name_announce = bool(name_announce)
+        # Last chat author whose line was actually queued. A repeat skips the name.
+        self._last_chat_speaker_key: str | None = None
         self._queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=queue_max)
         self._closed = False
         self._task = asyncio.create_task(
@@ -319,8 +336,15 @@ class VoiceSession:
         return not self._closed
 
     def set_name_announce(self, enabled: bool) -> bool:
-        """Enable or disable speaker-name prefix in TTS. Returns the new value."""
-        self.name_announce = bool(enabled)
+        """Enable or disable speaker-name prefix in TTS. Returns the new value.
+
+        Turning the prefix on or off starts a new speaker run, so the next
+        chat line says the name again when reading is on.
+        """
+        enabled = bool(enabled)
+        if enabled != self.name_announce:
+            self._last_chat_speaker_key = None
+        self.name_announce = enabled
         return self.name_announce
 
     def rebind_channel(
@@ -329,6 +353,8 @@ class VoiceSession:
     ) -> None:
         self.voice_channel_id = voice_channel.id
         self.voice_channel_name = voice_channel.name
+        # A new room is a new conversation; the next line names its sender.
+        self._last_chat_speaker_key = None
 
     def enqueue_speech(self, text: str) -> bool:
         """Queue TTS text. Drops oldest entry if the queue is full. Returns False if closed."""
@@ -360,8 +386,15 @@ class VoiceSession:
         channel_id: int,
         content: str,
         command_prefix: str,
+        author_id: int | None = None,
     ) -> bool:
-        """Filter a Discord message and queue speech if it belongs to this session."""
+        """Filter a Discord message and queue speech if it belongs to this session.
+
+        When name reading is on, the first queued line from a person is
+        ``"{name} nói {message}"``. Later queued lines from that same person
+        omit the name until someone else is spoken, the room changes, or the
+        setting is toggled. Messages that are not spoken do not change the run.
+        """
         if not is_session_chat_message(
             author_is_bot=author_is_bot,
             guild_id=guild_id,
@@ -371,11 +404,17 @@ class VoiceSession:
             command_prefix=command_prefix,
         ):
             return False
+        speaker_key = chat_speaker_key(author_id, author_name)
+        repeat_speaker = (
+            self.name_announce
+            and speaker_key is not None
+            and speaker_key == self._last_chat_speaker_key
+        )
         speech = prepare_chat_speech(
             content,
             author_name=author_name,
             max_chars=self.max_speech_chars,
-            announce_name=self.name_announce,
+            announce_name=self.name_announce and not repeat_speaker,
         )
         if speech is None:
             return False
@@ -387,6 +426,8 @@ class VoiceSession:
         for segment in segments:
             if self.enqueue_speech(segment):
                 queued_any = True
+        if queued_any and speaker_key is not None:
+            self._last_chat_speaker_key = speaker_key
         return queued_any
 
     async def close(self) -> None:

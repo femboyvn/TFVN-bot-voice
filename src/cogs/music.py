@@ -446,8 +446,9 @@ class MusicCog(commands.Cog, name="Music"):
         """Turn speaker-name TTS prefix on or off for this guild.
 
         Usage: ``!tfd nameannounce on`` / ``!tfd nameannounce off``
-        Default is off (message body only). The value is also stored
-        in the panel settings form and reused by later chat-reading sessions.
+        Default is off (message body only). When on, a run of messages from
+        the same person says the name only on the first line. The value is
+        also stored in the panel settings form and reused by later sessions.
         """
         async with self._operation_lock(ctx.guild.id):
             session = self.sessions.get(ctx.guild.id)
@@ -483,7 +484,8 @@ class MusicCog(commands.Cog, name="Music"):
         if enabled:
             await ctx.send(
                 "Đã bật đọc tên người gửi "
-                f"(`Tên nói …`). Dùng `{ctx.prefix}nameannounce off` để tắt."
+                f"(`Tên nói …`). Cùng một người nhắn liên tiếp thì chỉ đọc tên "
+                f"ở tin đầu. Dùng `{ctx.prefix}nameannounce off` để tắt."
             )
         else:
             await ctx.send(
@@ -868,6 +870,7 @@ class MusicCog(commands.Cog, name="Music"):
         session.offer_chat_message(
             author_is_bot=bool(message.author.bot),
             author_name=author,
+            author_id=message.author.id,
             guild_id=message.guild.id,
             channel_id=message.channel.id,
             content=content,
