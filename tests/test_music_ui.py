@@ -11,6 +11,7 @@ from src.help_ui import HelpMenuView
 from src.music_ui import (
     AddInputResult,
     AddMusicModal,
+    AudioSettingsMenuView,
     AudioSettingsModal,
     AudioSettingsValidationError,
     ClearQueueConfirmation,
@@ -34,8 +35,13 @@ def _snapshot(
     current: QueuedTrack | None = None,
     queued: tuple[QueuedTrack, ...] = (),
     loop: bool = False,
+    loop_queue: bool = False,
+    can_previous: bool = False,
 ) -> PlayerSnapshot:
-    return PlayerSnapshot(current=current, queued=queued, state=state, loop_current=loop)
+    return PlayerSnapshot(
+        current=current, queued=queued, state=state, loop_current=loop,
+        loop_queue=loop_queue, can_previous=can_previous,
+    )
 
 
 class _Actions:
@@ -53,6 +59,10 @@ class _Actions:
         self.ui_pause = AsyncMock(return_value="Đã tạm dừng.")
         self.ui_resume = AsyncMock(return_value="Đã tiếp tục.")
         self.ui_skip = AsyncMock(return_value="Đã bỏ qua.")
+        self.ui_previous = AsyncMock(return_value="Đã phát bài trước.")
+        self.ui_shuffle_queue = AsyncMock(return_value="Đã xáo trộn.")
+        self.ui_remove_queued = AsyncMock(return_value="Đã xóa.")
+        self.ui_move_queued = AsyncMock(return_value="Đã đổi chỗ.")
         self.ui_toggle_loop = AsyncMock(return_value="Đã bật lặp.")
         self.ui_jump = AsyncMock(return_value="Đã tua.")
         self.ui_clear_queue = AsyncMock(return_value="Đã xóa.")
@@ -64,6 +74,9 @@ class _Actions:
         self.ui_toggle_chat_reading = AsyncMock(
             return_value="Đã bật đọc tin nhắn."
         )
+        self.ui_toggle_voice_notice = AsyncMock(
+            return_value="Đã bật thông báo người tham gia."
+        )
         self.ui_update_audio_settings = AsyncMock(
             return_value=(
                 "Đã cập nhật cài đặt: Nhạc: 125.5% · "
@@ -71,6 +84,11 @@ class _Actions:
                 "Đọc tên: Tắt."
             )
         )
+        self.ui_list_soundboard = AsyncMock(return_value=())
+        self.ui_list_playlists = AsyncMock(return_value=())
+        self.ui_play_soundboard = AsyncMock(return_value="Đã phát.")
+        self.ui_add_soundboard = AsyncMock(return_value="Đã lưu.")
+        self.ui_remove_soundboard = AsyncMock(return_value="Đã xóa.")
 
     def ui_snapshot(self, guild_id: int) -> PlayerSnapshot | None:
         return self.current_snapshot
@@ -129,10 +147,22 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in embed.fields}
         self.assertEqual(values["Kênh thoại"], "<#123>")
         self.assertIn("Bài thử", values["Bài hiện tại"])
-        self.assertEqual(values["Lặp bài"], "Bật")
+        self.assertEqual(values["Lặp"], "Bài")
         self.assertEqual(values["Đang chờ"], "7")
         self.assertIn("Bài 5", values["Tiếp theo"])
         self.assertNotIn("Bài 6", values["Tiếp theo"])
+        queue_loop = build_music_embed(
+            123,
+            _snapshot(
+                state=PlaybackState.PLAYING,
+                current=self.track,
+                loop_queue=True,
+            ),
+        )
+        self.assertEqual(
+            {field.name: field.value for field in queue_loop.fields}["Lặp"],
+            "Hàng đợi",
+        )
 
     def test_embed_shows_public_audio_settings(self) -> None:
         embed = build_music_embed(
@@ -145,7 +175,8 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in embed.fields}
         self.assertEqual(
             values["Cài đặt âm thanh"],
-            "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW · Đọc tên: Tắt",
+            "Nhạc: 125.5% · Nhạc còn lại khi TTS: 20.25% · TTS: zh-TW · "
+            "Đọc tên: Tắt · Tham gia: Bật · Rời đi: Tắt · Tắt âm: Tắt · Tắt mic: Tắt",
         )
         self.assertEqual(values["Tự đưa bảng lên"], "Mỗi 15 phút")
 
@@ -216,6 +247,15 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(idle.pause_resume.disabled)
         self.assertFalse(idle.show_queue.disabled)
         self.assertEqual(idle.loop_track.style, discord.ButtonStyle.primary)
+        self.assertEqual(idle.loop_track.label, "Lặp bài")
+        self.assertTrue(idle.previous_track.disabled)
+
+        idle.sync(_snapshot(
+            state=PlaybackState.PLAYING, current=self.track,
+            loop_queue=True, can_previous=True,
+        ))
+        self.assertEqual(idle.loop_track.label, "Lặp hàng")
+        self.assertFalse(idle.previous_track.disabled)
 
         idle.sync(
             _snapshot(
@@ -234,10 +274,48 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
             row: sum(child.row == row for child in view.children)
             for row in range(4)
         }
-        self.assertEqual(controls_per_row, {0: 4, 1: 4, 2: 4, 3: 1})
-        self.assertEqual(len(view.children), 13)
+        self.assertEqual(controls_per_row, {0: 5, 1: 4, 2: 4, 3: 3})
+        self.assertEqual(len(view.children), 16)
+        self.assertEqual(view.open_soundboard.label, "Bảng âm thanh")
         self.assertEqual(view.show_help.label, "Trợ giúp")
         self.assertFalse(view.show_help.disabled)
+        self.assertEqual(view.open_playlists.label, "My Playlist")
+        self.assertFalse(view.open_playlists.disabled)
+
+    async def test_playlist_button_opens_requester_library(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        interaction = _interaction()
+        interaction.followup.send = AsyncMock(return_value=MagicMock())
+        await view.open_playlists.callback(interaction)
+        actions.ui_list_playlists.assert_awaited_once_with(1, interaction.user.id)
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(kwargs["view"].requester_id, interaction.user.id)
+        self.assertIs(kwargs["view"].panel_view, view)
+
+    async def test_playlist_button_denies_outsider_before_reading_library(self) -> None:
+        actions = _Actions(_snapshot())
+        actions.ui_ensure_panel_access.return_value = False
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        await view.open_playlists.callback(_interaction())
+        actions.ui_list_playlists.assert_not_awaited()
+
+    async def test_soundboard_button_opens_ephemeral_picker(self) -> None:
+        actions = _Actions(_snapshot())
+        view = MusicPanelView(actions, MagicMock(), 1, 2, actions.current_snapshot)
+        interaction = _interaction()
+        interaction.followup.send = AsyncMock(return_value=MagicMock())
+
+        await view.open_soundboard.callback(interaction)
+
+        actions.ui_ensure_panel_access.assert_awaited()
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+        actions.ui_list_soundboard.assert_awaited_once_with(1)
+        kwargs = interaction.followup.send.await_args.kwargs
+        self.assertEqual(kwargs["embed"].title, "Bảng âm thanh")
+        self.assertTrue(kwargs["ephemeral"])
 
         modal = AudioSettingsModal(
             view,
@@ -250,7 +328,6 @@ class EmbedAndViewTests(unittest.IsolatedAsyncioTestCase):
                 modal.music_volume,
                 modal.duck_level,
                 modal.tts_language,
-                modal.name_announce,
                 modal.panel_bump_minutes,
             ],
         )
@@ -348,7 +425,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         self.actions.ui_add_input.assert_not_awaited()
         self.manager.refresh.assert_not_awaited()
 
-    async def test_settings_button_opens_prefilled_modal_for_disconnected_access(self) -> None:
+    async def test_settings_button_opens_toggle_menu_for_disconnected_access(self) -> None:
         interaction = _interaction()
 
         await self.view.audio_settings.callback(interaction)
@@ -359,26 +436,88 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             2,
             connect_if_missing=True,
         )
-        interaction.response.send_modal.assert_awaited_once()
-        modal = interaction.response.send_modal.await_args.args[0]
+        interaction.response.send_modal.assert_not_awaited()
+        kwargs = interaction.response.send_message.await_args.kwargs
+        menu = kwargs["view"]
+        self.assertIsInstance(menu, AudioSettingsMenuView)
+        self.assertEqual(kwargs["embed"].title, "Cài đặt âm thanh")
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertEqual(menu.read_song_title.label, "Đọc tên bài hát: Bật")
+        self.assertEqual(menu.read_chat.label, "Đọc tin nhắn: Tắt")
+        self.assertEqual(menu.read_sender_name.label, "Đọc tên người gửi: Tắt")
+        self.assertEqual(menu.announce_join.label, "Thông báo người tham gia: Bật")
+        self.assertEqual(menu.announce_leave.label, "Thông báo người rời đi: Tắt")
+        self.assertEqual(menu.announce_deafen.label, "Thông báo tắt âm: Tắt")
+        self.assertEqual(menu.announce_mute.label, "Thông báo tắt mic: Tắt")
+        self.assertEqual(menu.open_volume_form.label, "Âm lượng")
+        self.assertEqual(self.view.audio_settings.label, "Cài đặt âm thanh")
+        self.assertEqual(
+            self.view.audio_settings.style,
+            discord.ButtonStyle.secondary,
+        )
+        rows = {
+            row: sum(child.row == row for child in menu.children)
+            for row in range(4)
+        }
+        self.assertEqual(rows, {0: 3, 1: 2, 2: 2, 3: 1})
+
+    async def test_volume_button_opens_prefilled_modal(self) -> None:
+        interaction = _interaction()
+        await self.view.audio_settings.callback(interaction)
+        menu = interaction.response.send_message.await_args.kwargs["view"]
+        volume_interaction = _interaction()
+
+        await menu.open_volume_form.callback(volume_interaction)
+
+        volume_interaction.response.send_modal.assert_awaited_once()
+        modal = volume_interaction.response.send_modal.await_args.args[0]
         self.assertIsInstance(modal, AudioSettingsModal)
+        self.assertEqual(modal.title, "Âm lượng và ngôn ngữ")
         self.assertEqual(modal.timeout, 120.0)
         self.assertEqual(modal.music_volume.default, "70")
         self.assertEqual(modal.duck_level.default, "20")
         self.assertEqual(modal.tts_language.default, "vi")
         self.assertEqual(modal.panel_bump_minutes.default, "15")
-        self.assertEqual(modal.name_announce.placeholder, "on hoặc off")
-        self.assertEqual(modal.name_announce.default, "off")
-        self.actions.current_audio_settings = GuildAudioSettings(0.7, 0.2, "vi", True)
-        on_interaction = _interaction()
-        await self.view.audio_settings.callback(on_interaction)
-        on_modal = on_interaction.response.send_modal.await_args.args[0]
-        self.assertEqual(on_modal.name_announce.default, "on")
-        self.assertEqual(self.view.audio_settings.label, "Cài đặt")
+
+    async def test_audio_menu_toggle_updates_the_button_and_refreshes_panel(self) -> None:
+        interaction = _interaction()
+        await self.view.audio_settings.callback(interaction)
+        menu = interaction.response.send_message.await_args.kwargs["view"]
+
+        async def turn_join_off(
+            _interaction: object,
+            _guild_id: int,
+            _channel_id: int,
+            kind: str,
+        ) -> str:
+            self.assertEqual(kind, "join")
+            current = self.actions.current_audio_settings
+            self.actions.current_audio_settings = GuildAudioSettings(
+                current.music_volume,
+                current.duck_level,
+                current.tts_language,
+                current.name_announce,
+                announce_join=False,
+            )
+            return "Đã tắt thông báo người tham gia."
+
+        self.actions.ui_toggle_voice_notice.side_effect = turn_join_off
+        click = _interaction()
+
+        await menu.announce_join.callback(click)
+
+        click.response.defer.assert_awaited_once()
+        edited = click.edit_original_response.await_args.kwargs
+        self.assertEqual(edited["content"], "Đã tắt thông báo người tham gia.")
         self.assertEqual(
-            self.view.audio_settings.style,
+            edited["view"].announce_join.label,
+            "Thông báo người tham gia: Tắt",
+        )
+        self.assertEqual(
+            edited["view"].announce_join.style,
             discord.ButtonStyle.secondary,
         )
+        self.manager.refresh.assert_awaited_with(1)
 
     async def test_settings_button_denial_does_not_open_modal(self) -> None:
         self.actions.ui_ensure_panel_access.return_value = False
@@ -425,15 +564,19 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
         self.manager.refresh.assert_not_awaited()
 
     async def test_settings_modal_submits_normalized_values_ephemerally(self) -> None:
-        modal = AudioSettingsModal(
-            self.view,
-            self.actions.current_audio_settings,
+        current = GuildAudioSettings(
+            0.7,
+            0.2,
+            "vi",
+            False,
+            announce_join=False,
+            announce_mute=True,
         )
+        modal = AudioSettingsModal(self.view, current)
         modal.music_volume._value = " 125,5% "
         modal.duck_level._value = "20.25%"
         modal.tts_language._value = " ZH_tw "
         modal.panel_bump_minutes._value = " 45 "
-        modal.name_announce._value = " tắt "
         interaction = _interaction()
 
         await modal.on_submit(interaction)
@@ -449,7 +592,14 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
             interaction,
             1,
             2,
-            GuildAudioSettings(1.255, 0.2025, "zh-TW", False),
+            GuildAudioSettings(
+                1.255,
+                0.2025,
+                "zh-TW",
+                False,
+                announce_join=False,
+                announce_mute=True,
+            ),
             45,
         )
         interaction.followup.send.assert_awaited_once_with(
@@ -470,8 +620,14 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
 
         await self.view.audio_settings.callback(open_interaction)
 
-        open_interaction.response.send_modal.assert_awaited_once()
-        modal = open_interaction.response.send_modal.await_args.args[0]
+        menu = open_interaction.response.send_message.await_args.kwargs["view"]
+        self.assertTrue(menu.read_song_title.disabled)
+        self.assertTrue(menu.announce_join.disabled)
+        self.assertFalse(menu.open_volume_form.disabled)
+        volume_interaction = _interaction()
+        await menu.open_volume_form.callback(volume_interaction)
+        volume_interaction.response.send_modal.assert_awaited_once()
+        modal = volume_interaction.response.send_modal.await_args.args[0]
         self.assertIsInstance(modal, AudioSettingsModal)
         self.assertEqual(
             modal.children,
@@ -511,18 +667,16 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_settings_modal_is_atomic_and_ephemeral(self) -> None:
         cases = (
-            ("NaN", "20", "vi", "off", "0", "Âm lượng nhạc"),
-            ("70", "101%", "vi", "off", "0", "khi TTS"),
-            ("70", "20", "không-có", "off", "0", "Mã ngôn ngữ TTS"),
-            ("70", "20", "vi", "maybe", "0", "Đọc tên người gửi"),
-            ("70", "20", "vi", "off", "1.5", "0 hoặc số phút"),
+            ("NaN", "20", "vi", "0", "Âm lượng nhạc"),
+            ("70", "101%", "vi", "0", "khi TTS"),
+            ("70", "20", "không-có", "0", "Mã ngôn ngữ TTS"),
+            ("70", "20", "vi", "1.5", "0 hoặc số phút"),
         )
-        for music, duck, language, announce, bump_minutes, expected_message in cases:
+        for music, duck, language, bump_minutes, expected_message in cases:
             with self.subTest(
                 music=music,
                 duck=duck,
                 language=language,
-                announce=announce,
                 bump_minutes=bump_minutes,
             ):
                 modal = AudioSettingsModal(
@@ -532,7 +686,6 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 modal.music_volume._value = music
                 modal.duck_level._value = duck
                 modal.tts_language._value = language
-                modal.name_announce._value = announce
                 modal.panel_bump_minutes._value = bump_minutes
                 interaction = _interaction()
 
@@ -667,6 +820,7 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_loop_and_stop_delegate_to_matching_actions(self) -> None:
         for button, action in (
             (self.view.next_track, self.actions.ui_skip),
+            (self.view.previous_track, self.actions.ui_previous),
             (self.view.loop_track, self.actions.ui_toggle_loop),
             (self.view.stop_music, self.actions.ui_stop),
         ):
@@ -674,6 +828,13 @@ class InteractionViewTests(unittest.IsolatedAsyncioTestCase):
                 interaction = _interaction()
                 await button.callback(interaction)
                 action.assert_awaited_once_with(interaction, 1, 2)
+
+    async def test_queue_shuffle_delegates_to_panel_action(self) -> None:
+        queued = (self.track, self.track)
+        paginator = QueuePaginatorView(10, queued, panel_view=self.view)
+        interaction = _interaction()
+        await paginator.shuffle_tracks.callback(interaction)
+        self.actions.ui_shuffle_queue.assert_awaited_once_with(interaction, 1, 2)
 
     async def test_jump_and_clear_buttons_open_their_dialogs(self) -> None:
         jump_interaction = _interaction()
@@ -1094,6 +1255,23 @@ class PanelManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager.get(1))
         message.edit.assert_awaited_once()
 
+    async def test_drop_if_channel_disables_panel_bound_to_deleted_room(self) -> None:
+        actions = _Actions(_snapshot())
+        manager = MusicPanelManager(actions)
+        message = MagicMock()
+        message.id = 100
+        message.edit = AsyncMock()
+        destination = MagicMock()
+        destination.id = 2
+        destination.send = AsyncMock(return_value=message)
+        await manager.post_panel(destination, 1, 2)
+
+        self.assertFalse(await manager.drop_if_channel(1, 99))
+        self.assertIsNotNone(manager.get(1))
+        self.assertTrue(await manager.drop_if_channel(1, 2))
+        self.assertIsNone(manager.get(1))
+        message.edit.assert_awaited()
+
     async def test_refresh_drops_deleted_panel_without_touching_playback(self) -> None:
         actions = _Actions(_snapshot())
         manager = MusicPanelManager(actions)
@@ -1341,7 +1519,8 @@ class PanelManagerTests(unittest.IsolatedAsyncioTestCase):
         values = {field.name: field.value for field in edited_embed.fields}
         self.assertEqual(
             values["Cài đặt âm thanh"],
-            "Nhạc: 110% · Nhạc còn lại khi TTS: 40% · TTS: ja · Đọc tên: Tắt",
+            "Nhạc: 110% · Nhạc còn lại khi TTS: 40% · TTS: ja · "
+            "Đọc tên: Tắt · Tham gia: Bật · Rời đi: Tắt · Tắt âm: Tắt · Tắt mic: Tắt",
         )
         replacement = manager.get(1)
         self.assertEqual(replacement.view.toggle_title_reading.label, "Đọc tên bài: Tắt")

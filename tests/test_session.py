@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import unittest
 from unittest.mock import Mock
 
@@ -12,8 +13,10 @@ from src.session import (
     VoiceSession,
     chunk_speech_text,
     is_session_chat_message,
+    join_announcement_name,
     prepare_chat_speech,
     sanitize_for_speech,
+    voice_event_announcement,
 )
 from src.tts import TextToSpeech
 
@@ -46,6 +49,263 @@ class ChatFilterTests(unittest.TestCase):
         self.assertFalse(is_session_chat_message(**{**base, "content": "   "}))
         self.assertFalse(
             is_session_chat_message(**{**base, "content": "!tfd leave"})
+        )
+
+
+class JoinAnnouncementTests(unittest.TestCase):
+    def test_join_announces_name_and_joined_phrase(self) -> None:
+        self.assertEqual(
+            join_announcement_name(
+                member_is_bot=False,
+                before_channel_id=None,
+                after_channel_id=7,
+                bot_channel_id=7,
+                display_name="Lan",
+            ),
+            "Lan đã tham gia",
+        )
+
+    def test_move_into_bot_room_announces_joined_phrase(self) -> None:
+        self.assertEqual(
+            join_announcement_name(
+                member_is_bot=False,
+                before_channel_id=3,
+                after_channel_id=7,
+                bot_channel_id=7,
+                display_name="Minh",
+            ),
+            "Minh đã tham gia",
+        )
+
+    def test_leave_mute_other_room_and_bots_stay_silent(self) -> None:
+        silent = dict(
+            member_is_bot=False,
+            before_channel_id=7,
+            after_channel_id=None,
+            bot_channel_id=7,
+            display_name="Lan",
+        )
+        self.assertIsNone(join_announcement_name(**silent))
+        self.assertIsNone(
+            join_announcement_name(**{**silent, "after_channel_id": 7})
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{**silent, "before_channel_id": None, "after_channel_id": 4}
+            )
+        )
+        self.assertIsNone(
+            join_announcement_name(**{**silent, "member_is_bot": True, "after_channel_id": 7, "before_channel_id": None})
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{
+                    **silent,
+                    "before_channel_id": None,
+                    "after_channel_id": 7,
+                    "display_name": "🎉",
+                }
+            )
+        )
+        self.assertIsNone(
+            join_announcement_name(
+                **{**silent, "before_channel_id": None, "bot_channel_id": None}
+            )
+        )
+
+
+class VoiceEventAnnouncementTests(unittest.TestCase):
+    def _event(self, **overrides: object) -> str | None:
+        base = dict(
+            member_is_bot=False,
+            before_channel_id=7,
+            after_channel_id=7,
+            bot_channel_id=7,
+            display_name="Lan",
+            before_self_muted=False,
+            after_self_muted=False,
+            before_server_muted=False,
+            after_server_muted=False,
+            before_self_deafened=False,
+            after_self_deafened=False,
+            before_server_deafened=False,
+            after_server_deafened=False,
+            announce_join=True,
+            announce_leave=False,
+            announce_mute=False,
+            announce_deafen=False,
+        )
+        base.update(overrides)
+        return voice_event_announcement(**base)
+
+    def test_leave_join_mute_and_deafen_use_their_phrases(self) -> None:
+        self.assertEqual(
+            self._event(before_channel_id=7, after_channel_id=None, announce_leave=True),
+            "Lan đã rời đi",
+        )
+        self.assertEqual(
+            self._event(before_channel_id=None, after_channel_id=7),
+            "Lan đã tham gia",
+        )
+        self.assertEqual(
+            self._event(after_self_muted=True, announce_mute=True),
+            "Lan đã tắt mic",
+        )
+        self.assertEqual(
+            self._event(after_self_deafened=True, announce_deafen=True),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                announce_mute=True,
+            ),
+            "Lan đã bật mic",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_deafened=True,
+                after_self_deafened=False,
+                before_self_muted=True,
+                after_self_muted=False,
+                announce_deafen=True,
+                announce_mute=True,
+            ),
+            "Lan đã bật âm",
+        )
+
+    def test_disabled_notices_and_unchanged_flags_stay_silent(self) -> None:
+        self.assertIsNone(
+            self._event(before_channel_id=7, after_channel_id=None)
+        )
+        self.assertIsNone(
+            self._event(
+                before_channel_id=None,
+                after_channel_id=7,
+                announce_join=False,
+            )
+        )
+        self.assertIsNone(self._event(after_self_muted=True))
+        self.assertIsNone(
+            self._event(before_self_muted=True, after_self_muted=False, announce_mute=False)
+        )
+        self.assertIsNone(
+            self._event(
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_deafen=False,
+            )
+        )
+        self.assertIsNone(
+            self._event(after_self_deafened=True, announce_deafen=False)
+        )
+        self.assertIsNone(
+            self._event(
+                before_channel_id=3,
+                after_channel_id=4,
+                after_self_muted=True,
+                announce_mute=True,
+            )
+        )
+
+    def test_mute_and_deafen_together_announce_only_deafen(self) -> None:
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=False,
+                announce_deafen=True,
+            ),
+            "Lan đã tắt âm",
+        )
+        self.assertEqual(
+            self._event(
+                after_self_muted=True,
+                after_self_deafened=True,
+                announce_mute=True,
+                announce_deafen=False,
+            ),
+            "Lan đã tắt mic",
+        )
+
+    def test_unmute_and_undeafen_together_announce_only_sound(self) -> None:
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã bật âm",
+        )
+        self.assertEqual(
+            self._event(
+                before_self_muted=True,
+                after_self_muted=False,
+                before_self_deafened=True,
+                after_self_deafened=False,
+                announce_mute=True,
+                announce_deafen=False,
+            ),
+            "Lan đã bật mic",
+        )
+
+    def test_joining_already_muted_does_not_announce_mute(self) -> None:
+        self.assertEqual(
+            self._event(
+                before_channel_id=None,
+                after_channel_id=7,
+                before_self_muted=False,
+                after_self_muted=True,
+                announce_mute=True,
+            ),
+            "Lan đã tham gia",
+        )
+
+    def test_server_mute_and_deafen_use_separate_phrases(self) -> None:
+        self.assertEqual(
+            self._event(after_server_muted=True, announce_mute=True),
+            "Lan đã bị nhét giẻ vào mồm",
+        )
+        self.assertEqual(
+            self._event(after_server_deafened=True, announce_deafen=True),
+            "Lan đã bị đấm thủng lỗ tai",
+        )
+        self.assertEqual(
+            self._event(
+                after_server_muted=True,
+                after_server_deafened=True,
+                announce_mute=True,
+                announce_deafen=True,
+            ),
+            "Lan đã bị đấm thủng lỗ tai",
+        )
+        self.assertIsNone(
+            self._event(
+                before_server_muted=True,
+                after_server_muted=False,
+                announce_mute=True,
+            )
+        )
+        self.assertEqual(
+            self._event(
+                after_server_muted=True,
+                after_self_muted=True,
+                announce_mute=True,
+            ),
+            "Lan đã bị nhét giẻ vào mồm. Lan đã tắt mic",
         )
 
 
@@ -198,6 +458,193 @@ class VoiceSessionOfferTests(unittest.IsolatedAsyncioTestCase):
                     command_prefix="!tfd ",
                 )
             )
+        finally:
+            await session.close()
+
+    async def _quiet_session(self, *, name_announce: bool = False) -> VoiceSession:
+        """Session whose speak loop is stopped so tests can read the queue."""
+        bot = Mock()
+        bot.loop = asyncio.get_running_loop()
+        guild = Mock()
+        guild.id = 10
+        guild.voice_client = None
+        channel = Mock()
+        channel.id = 55
+        channel.name = "General"
+        tts = TextToSpeech(synthesizer=lambda text, path: path.write_bytes(b"x" * 8))
+        session = VoiceSession(
+            bot,
+            guild,
+            channel,
+            tts,
+            volume=0.5,
+            name_announce=name_announce,
+        )
+        session._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await session._task
+        return session
+
+    def _offer(
+        self,
+        session: VoiceSession,
+        *,
+        author_id: int,
+        author_name: str,
+        content: str,
+        channel_id: int = 55,
+    ) -> bool:
+        return session.offer_chat_message(
+            author_is_bot=False,
+            author_name=author_name,
+            author_id=author_id,
+            guild_id=10,
+            channel_id=channel_id,
+            content=content,
+            command_prefix="!tfd ",
+        )
+
+    def _queued(self, session: VoiceSession) -> list[str]:
+        lines: list[str] = []
+        while True:
+            try:
+                item = session._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return lines
+            session._queue.task_done()
+            if item is not None:
+                lines.append(item)
+
+    async def test_repeat_speaker_omits_name_until_someone_else_speaks(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(
+                    session,
+                    author_id=1,
+                    author_name="Lan Mới",
+                    content="hai",
+                )
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Minh", content="ba")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="bốn")
+            )
+            self.assertEqual(
+                self._queued(session),
+                ["Lan nói một", "hai", "Minh nói ba", "Lan nói bốn"],
+            )
+        finally:
+            await session.close()
+
+    async def test_same_display_name_still_names_a_different_person(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Lan", content="hai")
+            )
+            self.assertEqual(
+                self._queued(session),
+                ["Lan nói một", "Lan nói hai"],
+            )
+        finally:
+            await session.close()
+
+    async def test_unspoken_messages_do_not_break_a_speaker_run(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertFalse(
+                self._offer(session, author_id=2, author_name="Minh", content="😂")
+            )
+            self.assertFalse(
+                self._offer(
+                    session,
+                    author_id=2,
+                    author_name="Minh",
+                    content="!tfd leave",
+                )
+            )
+            self.assertFalse(
+                self._offer(
+                    session,
+                    author_id=2,
+                    author_name="Minh",
+                    content="nghe này",
+                    channel_id=999,
+                )
+            )
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="hai")
+            )
+            self.assertEqual(self._queued(session), ["Lan nói một", "hai"])
+        finally:
+            await session.close()
+
+    async def test_name_announce_toggle_and_rebind_start_a_new_run(self) -> None:
+        session = await self._quiet_session(name_announce=True)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(session.set_name_announce(True))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="hai")
+            )
+            self.assertFalse(session.set_name_announce(False))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="ba")
+            )
+            self.assertTrue(session.set_name_announce(True))
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="bốn")
+            )
+            other = Mock()
+            other.id = 56
+            other.name = "Other"
+            session.rebind_channel(other)
+            self.assertTrue(
+                self._offer(
+                    session,
+                    author_id=1,
+                    author_name="Lan",
+                    content="năm",
+                    channel_id=56,
+                )
+            )
+            self.assertEqual(
+                self._queued(session),
+                [
+                    "Lan nói một",
+                    "hai",
+                    "ba",
+                    "Lan nói bốn",
+                    "Lan nói năm",
+                ],
+            )
+        finally:
+            await session.close()
+
+    async def test_name_announce_off_never_prefixes(self) -> None:
+        session = await self._quiet_session(name_announce=False)
+        try:
+            self.assertTrue(
+                self._offer(session, author_id=1, author_name="Lan", content="một")
+            )
+            self.assertTrue(
+                self._offer(session, author_id=2, author_name="Minh", content="hai")
+            )
+            self.assertEqual(self._queued(session), ["một", "hai"])
         finally:
             await session.close()
 

@@ -27,6 +27,14 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Vào kênh thoại của bạn và gửi bảng điều khiển nhạc dùng chung.",
     ),
+    "soundboard": (
+        "",
+        "Vào kênh thoại, gửi bảng nhạc, và mở bảng âm thanh tùy chỉnh.",
+    ),
+    "playlist": (
+        "[server] [list | show | create | add | save | play | rename | remove | move | delete]",
+        "Tạo, sửa, lưu hàng đợi và phát danh sách cá nhân hoặc chung của máy chủ.",
+    ),
     "join": (
         "",
         "Vào kênh thoại và bắt đầu đọc chat văn bản của kênh đó bằng TTS.",
@@ -35,9 +43,14 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Dừng nhạc, tắt đọc chat, và rời kênh thoại.",
     ),
+    "forceleave": (
+        "",
+        "Buộc bot rời khi nó kẹt sau khi kênh thoại tạm bị xóa. Cần quyền Quản trị viên.",
+    ),
     "nameannounce": (
         "on | off",
-        "Bật hoặc tắt đọc tên người gửi trước nội dung tin nhắn TTS.",
+        "Bật hoặc tắt đọc tên người gửi trước nội dung tin nhắn TTS. "
+        "Cùng một người nhắn liên tiếp thì chỉ đọc tên ở tin đầu.",
     ),
     "play": (
         "<URL hoặc từ khóa>",
@@ -61,11 +74,11 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
     ),
     "skip": (
         "",
-        "Bỏ qua bài đang phát.",
+        "Bỏ phiếu bỏ qua bài đang phát; đủ nửa phòng thì cắt.",
     ),
     "loop": (
         "",
-        "Bật hoặc tắt lặp bài hiện tại.",
+        "Chuyển lặp: tắt → bài hiện tại → cả hàng đợi.",
     ),
     "stop": (
         "",
@@ -159,7 +172,7 @@ def _build_overview(prefix: str) -> discord.Embed:
         "**Bắt đầu nhanh**\n"
         f"1. Vào một kênh thoại.\n"
         f"2. Gõ {music} để bot vào phòng và gửi **bảng điều khiển nhạc**.\n"
-        "3. Bấm **Thêm nhạc** để tìm bài, dán URL, hoặc playlist YouTube.\n\n"
+        "3. Bấm **Tìm bài** để tìm bài, dán URL YouTube/Spotify, hoặc playlist.\n\n"
         "Chỉ thành viên trong **đúng kênh thoại** của bot mới dùng được nút "
         "và lệnh điều khiển — kể cả quản trị viên cũng phải vào cùng phòng.\n\n"
         f"Chọn chủ đề bên dưới, hoặc dùng {help_cmd} để xem một lệnh cụ thể.",
@@ -176,11 +189,12 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Thêm và phát",
         value=(
-            "**Thêm nhạc** — tên bài, URL video, hoặc playlist YouTube. "
-            "Tìm kiếm hiện tối đa 5 kết quả riêng; playlist thêm tối đa 25 video mỗi lần.\n"
+            "**Tìm bài** — tên bài, URL YouTube hoặc Spotify, playlist YouTube/Spotify. "
+            "Tìm kiếm hiện tối đa 5 kết quả riêng; playlist thêm tối đa 25 bài mỗi lần.\n"
             "**Tạm dừng / Tiếp tục** — dừng hoặc phát tiếp bài hiện tại.\n"
-            "**Bài tiếp** — bỏ qua bài đang phát, kể cả khi bài đang tải.\n"
-            "**Lặp** — bật hoặc tắt lặp bài hiện tại.\n"
+            "**Trước** — phát lại bài vừa xong; bài hiện tại được đưa lên đầu hàng đợi.\n"
+            "**Bài tiếp** — bỏ phiếu bỏ qua bài đang phát (đủ nửa phòng thì cắt).\n"
+            "**Lặp** — tắt → lặp bài → lặp cả hàng đợi.\n"
             "**Tua đến** — nhảy tới mốc `HH:MM:SS`."
         ),
         inline=False,
@@ -188,10 +202,19 @@ def _build_panel(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Hàng đợi",
         value=(
-            "**Hàng đợi** — danh sách chờ, 10 bài mỗi trang.\n"
+            "**Hàng đợi** — danh sách chờ, 10 bài mỗi trang; xáo trộn, xóa một bài, đổi chỗ.\n"
             "**Xóa hàng đợi** — xóa bài đang chờ; bài hiện tại vẫn phát. Có bước xác nhận.\n"
             "**Dừng** — dừng bài hiện tại và xóa hàng đợi. Bot ở lại kênh; "
             "phiên đọc chat không bị tắt."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Danh sách phát",
+        value=(
+            "**My Playlist** — thư viện riêng của bạn, hoặc bấm **Máy chủ** để "
+            "xem danh sách chung. Tạo/xóa danh sách chung cần quyền Quản lý máy chủ. "
+            "**Phát** thêm vào cuối hàng đợi. Danh sách vẫn còn sau khi bot khởi động lại."
         ),
         inline=False,
     )
@@ -201,8 +224,10 @@ def _build_panel(prefix: str) -> discord.Embed:
             "**Đọc tên bài** — đọc to tiêu đề khi bài mới bắt đầu. "
             "Dòng chữ **Đang phát** vẫn được gửi khi tắt đọc.\n"
             "**Đọc tin nhắn** — đọc chat văn bản của kênh thoại.\n"
-            "**Cài đặt** — âm lượng nhạc, mức nhạc khi TTS, ngôn ngữ TTS, "
-            "đọc tên người gửi, và tự đưa bảng lên.\n"
+            "**Bảng âm thanh** — thêm URL hoặc tìm MyInstants, phát clip đè lên nhạc.\n"
+            "**Cài đặt âm thanh** — bật hoặc tắt đọc tên bài hát, đọc tin nhắn, "
+            "đọc tên người gửi, và thông báo tham gia, rời đi, tắt âm, tắt mic. "
+            "Nút **Âm lượng** trong đó mở form âm lượng, ngôn ngữ TTS, và đưa bảng lên.\n"
             "**Rời** — dừng nhạc, tắt đọc chat, và rời kênh thoại.\n"
             "**Trợ giúp** — menu này, không cần ở trong kênh thoại."
         ),
@@ -245,7 +270,10 @@ def _build_commands(prefix: str) -> discord.Embed:
     )
     embed.add_field(
         name="Thoại và TTS",
-        value=_command_lines(prefix, ("join", "leave", "nameannounce")),
+        value=_command_lines(
+            prefix,
+            ("join", "leave", "forceleave", "nameannounce", "soundboard"),
+        ),
         inline=False,
     )
     embed.add_field(
@@ -254,6 +282,11 @@ def _build_commands(prefix: str) -> discord.Embed:
             f"{_command(prefix, 'help')} mở menu này. "
             f"{_command(prefix, 'help', COMMAND_HELP['help'][0])} xem một lệnh."
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Danh sách phát",
+        value=_command_lines(prefix, ("playlist",)),
         inline=False,
     )
     return embed
@@ -271,6 +304,7 @@ def _build_tts(prefix: str) -> discord.Embed:
             f"{_command(prefix, 'join')} hoặc nút **Đọc tin nhắn** trên bảng — "
             "bắt đầu đọc chat kênh thoại, không dừng nhạc.\n"
             f"{_command(prefix, 'leave')} hoặc nút **Rời** — tắt đọc chat, dừng nhạc, và rời phòng.\n"
+            f"{_command(prefix, 'forceleave')} — quản trị viên buộc bot thoát khi nó kẹt trong kênh thoại đã bị xóa.\n"
             f"{_command(prefix, 'stop')} hoặc nút **Dừng** — chỉ dừng nhạc; phiên đọc chat vẫn chạy."
         ),
         inline=False,
@@ -279,10 +313,18 @@ def _build_tts(prefix: str) -> discord.Embed:
         name="Cách đọc",
         value=(
             "Mặc định chỉ đọc nội dung tin nhắn. "
-            "Đặt **Đọc tên người gửi** thành `on` trong **Cài đặt**, hoặc "
-            f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …`; "
-            f"{_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
+            "Bật **Đọc tên người gửi** trong **Cài đặt âm thanh**, hoặc "
+            f"{_command(prefix, 'nameannounce', 'on')}, để đọc `Tên nói …` "
+            "khi đổi người gửi. Tin nhắn liên tiếp của cùng một người chỉ đọc "
+            f"nội dung. {_command(prefix, 'nameannounce', 'off')} tắt tên.\n"
             "Lệnh bot (tin bắt đầu bằng tiền tố) không được đọc. "
+            "**Thông báo người tham gia** (mặc định bật) đọc `Tên đã tham gia`. "
+            "**Thông báo người rời đi**, **Thông báo tắt âm**, và **Thông báo tắt mic** "
+            "mặc định tắt. Tự tắt mic đọc `Tên đã tắt mic` hoặc `Tên đã bật mic`. "
+            "Server mute đọc `Tên đã bị nhét giẻ vào mồm`. "
+            "Tự tắt âm đọc `Tên đã tắt âm` hoặc `Tên đã bật âm`. "
+            "Server deafen đọc `Tên đã bị đấm thủng lỗ tai`. "
+            "Âm và mic cùng nguồn đổi cùng lúc thì chỉ đọc câu âm.\n"
             "Khi nhạc đang phát, bot giảm âm lượng nhạc, đọc tin, rồi khôi phục."
         ),
         inline=False,
@@ -290,9 +332,10 @@ def _build_tts(prefix: str) -> discord.Embed:
     embed.add_field(
         name="Đọc tên bài",
         value=(
-            "Nút **Đọc tên bài** bật hoặc tắt đọc tiêu đề khi bài mới bắt đầu. "
+            "Nút **Đọc tên bài** trên bảng, hoặc **Đọc tên bài hát** trong "
+            "**Cài đặt âm thanh**, bật hoặc tắt đọc tiêu đề khi bài mới bắt đầu. "
             "Tắt đọc thì dòng chữ **Đang phát** vẫn được gửi. "
-            "Cả hai nút đọc sẽ mờ khi TTS bị tắt trên bot."
+            "Các nút đọc mờ khi TTS bị tắt trên bot."
         ),
         inline=False,
     )
@@ -302,19 +345,28 @@ def _build_tts(prefix: str) -> discord.Embed:
 def _build_settings(prefix: str) -> discord.Embed:
     embed = _base_embed(
         "Cài đặt âm thanh",
-        "Nút **Cài đặt** trên bảng mở form riêng. "
+        "Nút **Cài đặt âm thanh** trên bảng mở các nút bật/tắt. "
         "Thông số dùng chung cho cả máy chủ, không theo từng người. "
         "Mất khi bot khởi động lại.",
     )
     embed.add_field(
-        name="Các mục",
+        name="Các nút",
         value=(
-            "**Âm lượng nhạc** — `0`–`200` (phần trăm). Chỉ ảnh hưởng nhạc, không đổi độ lớn TTS.\n"
-            "**Âm lượng nhạc khi TTS** — `0`–`100`. `0` tạm tắt nhạc lúc đọc; `100` không giảm.\n"
-            "**Ngôn ngữ TTS** — mã gTTS như `vi`, `en`, `ja`, `ko`.\n"
-            "**Đọc tên người gửi** — `on` hoặc `off` (mặc định `off`). Khi `on`, "
-            "TTS đọc `Tên nói …` trước nội dung tin nhắn.\n"
-            "**Đưa bảng lên lại** — `0` tắt; `1`–`1440` phút tự gửi lại bảng."
+            "**Đọc tên bài hát** — đọc tiêu đề khi bài mới bắt đầu. Mặc định bật khi TTS bật.\n"
+            "**Đọc tin nhắn** — đọc chat của kênh thoại. Mặc định tắt.\n"
+            "**Đọc tên người gửi** — đọc `Tên nói …` khi đổi người gửi. "
+            "Tin liên tiếp của cùng một người chỉ đọc nội dung. Mặc định `off`. "
+            f"Lệnh {_command(prefix, 'nameannounce', 'on')} cũng dùng `on` hoặc `off`.\n"
+            "**Thông báo người tham gia** — đọc `Tên đã tham gia`. Mặc định bật.\n"
+            "**Thông báo người rời đi** — đọc `Tên đã rời đi`. Mặc định tắt.\n"
+            "**Thông báo tắt âm** — tự tắt đọc `Tên đã tắt âm` hoặc `Tên đã bật âm`. "
+            "Server đọc `Tên đã bị đấm thủng lỗ tai`. Mic cùng nguồn cùng lúc thì chỉ đọc câu âm. "
+            "Mặc định tắt.\n"
+            "**Thông báo tắt mic** — tự tắt đọc `Tên đã tắt mic` hoặc `Tên đã bật mic`. "
+            "Server đọc `Tên đã bị nhét giẻ vào mồm`. Gỡ server mute hoặc server deafen thì im. "
+            "Mặc định tắt.\n"
+            "**Âm lượng** — form âm lượng nhạc `0`–`200`, mức nhạc khi TTS `0`–`100`, "
+            "ngôn ngữ TTS (`vi`, `en`, `ja`, `ko`), và đưa bảng lên (`0` hoặc `1`–`1440`)."
         ),
         inline=False,
     )
@@ -322,15 +374,16 @@ def _build_settings(prefix: str) -> discord.Embed:
         name="Khi nào có hiệu lực",
         value=(
             "Âm lượng nhạc và mức giảm khi TTS áp ngay cho bài đang phát. "
-            "Đổi ngôn ngữ dùng cho tin TTS tiếp theo; đoạn đang đọc có thể giữ ngôn ngữ cũ.\n"
-            "Khi TTS tắt trên bot, form còn âm lượng nhạc và đưa bảng lên; "
-            "các mục TTS bị ẩn và không đổi."
+            "Đổi ngôn ngữ dùng cho tin TTS tiếp theo; đoạn đang đọc có thể giữ ngôn ngữ cũ. "
+            "Nút đọc tên người gửi áp dụng cho phiên chat đang chạy.\n"
+            "Khi TTS tắt trên bot, các nút đọc mờ. Form **Âm lượng** còn âm lượng nhạc "
+            "và đưa bảng lên; các mục TTS không đổi."
         ),
         inline=False,
     )
     embed.add_field(
         name="Lệnh liên quan",
-        value=f"{_command(prefix, 'music')} mở bảng để vào **Cài đặt**.",
+        value=f"{_command(prefix, 'music')} mở bảng để vào **Cài đặt âm thanh**.",
         inline=False,
     )
     return embed
@@ -345,22 +398,52 @@ _PAGE_BUILDERS = {
 }
 
 _COMMAND_DETAILS: dict[str, str] = {
+    "playlist": (
+        "Không có tham số: mở nút vào thư viện riêng.\n"
+        '`playlist create "Nhạc tối"` — tạo danh sách.\n'
+        '`playlist add "Nhạc tối" <URL hoặc từ khóa>` — thêm bài; '
+        "từ khóa lấy kết quả đầu tiên, nút **Thêm bài** cho chọn 5 kết quả.\n"
+        '`playlist save "Nhạc tối"` — tạo danh sách từ bài hiện tại và hàng đợi.\n'
+        '`playlist play "Nhạc tối"` — thêm toàn bộ vào cuối hàng đợi.\n'
+        '`playlist show "Nhạc tối"` — xem các bài.\n'
+        '`playlist rename "Nhạc tối" "Nhạc mới"` — đổi tên.\n'
+        '`playlist remove "Nhạc tối" 2` — xóa bài số 2.\n'
+        '`playlist move "Nhạc tối" 3 1` — chuyển bài 3 lên vị trí 1.\n'
+        '`playlist delete "Nhạc tối"` — xóa danh sách.\n'
+        '`playlist server list` — danh sách chung của máy chủ; '
+        "tạo/xóa chung cần quyền Quản lý máy chủ.\n"
+        "Thêm tiền tố bot trước các ví dụ. Chỉ chủ danh sách truy cập được; "
+        "phát và lưu hàng đợi yêu cầu ở cùng phòng thoại với bot. "
+        "Mỗi lần nhập URL playlist ngoài xét tối đa 25 bài."
+    ),
     "music": (
         "Chỉ có một bảng hoạt động trên mỗi máy chủ. Mở bảng mới sẽ tắt bảng cũ. "
-        "Sau khi bot khởi động lại, chạy lại lệnh này."
+        "Sau khi bot khởi động lại, bảng và hàng đợi được khôi phục nếu còn người "
+        "trong phòng thoại."
+    ),
+    "soundboard": (
+        "Thư viện clip theo từng máy chủ, lưu trên đĩa (tối đa 12 giây, 40 clip). "
+        "Phát đè lên nhạc đang chạy, không dừng hàng đợi. "
+        "Dán URL MyInstants, YouTube, tệp âm thanh, hoặc từ khóa MyInstants. "
+        "Không dùng được playlist."
     ),
     "join": (
         "Gõ tin trong **chat của kênh thoại** để bot đọc. "
         "Bot ở lại phòng ngay cả khi hàng đợi nhạc trống."
     ),
     "leave": "Đây là cách tắt hết nhạc, TTS, và kết nối thoại.",
+    "forceleave": (
+        "Chỉ quản trị viên. Dùng khi bot kẹt lại sau khi kênh thoại tạm thời "
+        "đã bị xóa. Bot đang ở phòng còn hoạt động thì vào phòng đó và dùng leave."
+    ),
     "nameannounce": (
         "Chỉ dùng khi phiên đọc chat đang chạy. Giá trị được lưu cho máy chủ "
         "(đến khi bot khởi động lại) và dùng cho phiên sau. "
+        "Cùng một người nhắn liên tiếp thì chỉ đọc tên ở tin đầu. "
         "Cũng có trong form **Cài đặt** trên bảng. Mặc định là tắt."
     ),
     "play": (
-        "Chấp nhận URL video, playlist YouTube, hoặc từ khóa tìm kiếm. "
+        "Chấp nhận URL YouTube, URL Spotify (bài, album, playlist), hoặc từ khóa tìm kiếm. "
         "Nếu bot đang ở kênh khác, hãy vào đúng kênh đó thay vì chuyển bot."
     ),
     "next": "Giống play nhưng luôn thêm vào hàng đợi, không cắt bài hiện tại.",
@@ -368,7 +451,12 @@ _COMMAND_DETAILS: dict[str, str] = {
     "stop": (
         "Không rời kênh thoại. Nếu phiên đọc chat đang chạy, bot vẫn đọc tin nhắn."
     ),
-    "search": "Kết quả là liên kết. Dùng play, next, hoặc **Thêm nhạc** để xếp hàng.",
+    "skip": (
+        "Mỗi người trong phòng thoại bỏ một phiếu. Đủ nửa số người thật thì cắt bài. "
+        "Bấm lại khi đã bỏ phiếu chỉ hiện số phiếu hiện tại."
+    ),
+    "loop": "Tắt → lặp bài hiện tại → lặp cả hàng đợi → tắt.",
+    "search": "Kết quả là liên kết. Dùng play, next, hoặc **Tìm bài** để xếp hàng.",
 }
 
 

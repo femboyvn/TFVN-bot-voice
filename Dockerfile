@@ -10,12 +10,16 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
     && apt-get install --no-install-recommends -y ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 bot \
-    && useradd --uid 10001 --gid bot --create-home bot
+    && useradd --uid 10001 --gid bot --create-home bot \
+    && mkdir -p /data/soundboard \
+    && chown bot:bot /data/soundboard
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+
+RUN mkdir -p /data/playlists && chown bot:bot /data/playlists
 
 COPY --chown=bot:bot main.py ./
 COPY --chown=bot:bot src ./src
