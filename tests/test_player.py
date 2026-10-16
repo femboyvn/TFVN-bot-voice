@@ -1246,10 +1246,14 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         finite = _FiniteSource()
 
         async def pump_mixer() -> None:
-            # Drive the mixer so the injected secondary can finish.
+            # Source construction runs in a thread. Wait until the secondary
+            # is injected before treating a quiet mixer as the end of the clip.
+            while not mixer.is_ducking:
+                await asyncio.sleep(0)
             for _ in range(10):
                 await asyncio.sleep(0)
-                if mixer.read() == b"" and not mixer.is_ducking:
+                mixer.read()
+                if not mixer.is_ducking:
                     break
 
         with patch("src.tts.discord.FFmpegPCMAudio", return_value=finite):
@@ -1263,6 +1267,8 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
                 pump.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await pump
+                # Unblock speak_over_music if the clip was never drained.
+                mixer.clear_secondary()
         self.assertTrue(ok)
         self.assertTrue(mixer.is_primary_paused)
         self.assertEqual(music.reads, 0)
