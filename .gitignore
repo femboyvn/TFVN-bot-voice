@@ -183,3 +183,4 @@ cython_debug/
 # Runtime soundboard clips (per-guild JSON + mp3)
 data/soundboard/
 data/playlists/
+data/recordings/

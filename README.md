@@ -12,6 +12,18 @@ that channel's text chat aloud (via gTTS).
 User-facing Discord replies and spoken TTS phrases are in **Vietnamese** (customer UI).
 Source comments, logs, and this README stay in English.
 
+## Recording
+
+`!tfd record` joins your voice channel and posts one shared **Ghi âm** panel. It does not start a take by itself. Anyone in that voice channel can press **Bắt đầu** or **Dừng**. People outside the channel cannot.
+
+A take stores separate time-aligned MP3s: one per person who speaks, plus `music.mp3`, `tts.mp3`, and `soundboard.mp3`. Music is kept at full volume, not the ducked level heard in the call. The panel shows the elapsed time and how many people have spoken. When the take stops, the bot posts a track list in the same text channel and attaches `take.zip` when Discord accepts the file.
+
+Pressing **Dừng** is one way to finish. The take also finishes when the bot leaves, is force-disconnected, or the voice channel is deleted, and when it reaches `RECORDING_MAX_MINUTES` (default 120) or `RECORDING_MAX_BYTES` (default 2 GiB). A person leaving the room does not stop the take; later speech from that same account continues on their MP3.
+
+Files are written under `RECORDING_DATA_DIR` (local default `data/recordings`, Compose volume `/data/recordings`). Do not point this at the read-only container root or `/tmp`. Each stem is sealed into a finished MP3 chunk about every 15 seconds, and a checkpoint records those chunks. If the bot stops mid-take, the open chunk is lost and the sealed chunks stay on disk. The next startup joins them into a zip, posts a recovery note in the saved text channel, and says the unfinished tail may be missing. Finished sessions are deleted after `RECORDING_RETENTION_DAYS` (default 7). When the existing R2 settings are present, the zip is uploaded under `RECORDING_R2_PREFIX` (default `recordings`) and the channel is told that sync succeeded. A failed upload keeps the local zip. If the zip is too large for Discord and the upload worked, the message includes a 24-hour download link.
+
+Receiving other people's audio depends on Discord's DAVE encryption. The bot decrypts inbound voice with the session discord.py already keeps for sending. Confirm a real two-person take before relying on the speaker tracks.
+
 ## Requirements
 
 - Python 3.12+
@@ -47,6 +59,7 @@ The default prefix is `!tfd `, including the trailing space.
 | `!tfd help` | Open the interactive help menu (topic selector). `!tfd help <command>` shows one command |
 | `!tfd music` / `/music` | Join your VC and open its shared interactive music panel |
 | `!tfd soundboard` / `/soundboard` | Join your VC, open the music panel, and open the custom soundboard |
+| `!tfd record` / `/record` | Join your VC and open the shared recording panel |
 | `!tfd playlist` / `/playlist` | Open personal or server playlists; `!tfd help playlist` lists editing commands |
 | `!tfd join` | Join your VC and monitor that channel's **text chat** (TTS) |
 | `!tfd leave` | Stop music, end chat reading, and leave voice |

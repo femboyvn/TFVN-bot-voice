@@ -129,6 +129,9 @@ class DictObjectStore:
         self.objects.pop(key, None)
         self.content_types.pop(key, None)
 
+    def list_entries(self) -> list[tuple[str, object]]:
+        return []
+
 
 def remote_object_key(prefix: str, relative: str) -> str:
     """Join an optional bucket prefix with a guild-relative object key."""
@@ -156,7 +159,12 @@ class S3ObjectStore:
         self._prefix = prefix.strip("/")
 
     @classmethod
-    def from_settings(cls, settings: object) -> S3ObjectStore:
+    def from_settings(
+        cls,
+        settings: object,
+        *,
+        prefix: str | None = None,
+    ) -> S3ObjectStore:
         """Build a live R2 client from validated application settings."""
         import boto3
         from botocore.config import Config as BotoConfig
@@ -170,10 +178,13 @@ class S3ObjectStore:
             region_name="auto",
             config=BotoConfig(signature_version="s3v4"),
         )
+        chosen = prefix if prefix is not None else str(
+            getattr(settings, "r2_prefix") or "soundboard"
+        )
         return cls(
             client,
             str(getattr(settings, "r2_bucket")),
-            prefix=str(getattr(settings, "r2_prefix") or "soundboard"),
+            prefix=chosen,
         )
 
     def _full(self, key: str) -> str:
@@ -208,6 +219,67 @@ class S3ObjectStore:
             )
         except Exception as exc:
             raise SoundboardError("Không lưu được âm thanh lên kho.") from exc
+
+    def put_file(
+        self,
+        key: str,
+        path: object,
+        *,
+        content_type: str,
+    ) -> None:
+        """Upload a file from disk. Large zips are not loaded into memory."""
+        from pathlib import Path
+
+        file_path = Path(str(path))
+        extra = {"ContentType": content_type}
+        try:
+            upload = getattr(self._client, "upload_file", None)
+            if callable(upload):
+                upload(str(file_path), self._bucket, self._full(key), ExtraArgs=extra)
+                return
+            with file_path.open("rb") as body:
+                self._client.put_object(
+                    Bucket=self._bucket,
+                    Key=self._full(key),
+                    Body=body,
+                    ContentType=content_type,
+                )
+        except Exception as exc:
+            raise SoundboardError("Không lưu được âm thanh lên kho.") from exc
+
+    def presigned_get(self, key: str, *, expires: int = 86400) -> str:
+        """Return a time-limited download URL for *key*."""
+        try:
+            url = self._client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": self._bucket, "Key": self._full(key)},
+                ExpiresIn=expires,
+            )
+        except Exception as exc:
+            raise SoundboardError("Không tạo được liên kết tải.") from exc
+        if not isinstance(url, str) or not url:
+            raise SoundboardError("Không tạo được liên kết tải.")
+        return url
+
+    def list_entries(self) -> list[tuple[str, object]]:
+        """Return ``(relative key, last modified)`` for objects under the prefix."""
+        try:
+            response = self._client.list_objects_v2(
+                Bucket=self._bucket,
+                Prefix=f"{self._prefix}/" if self._prefix else "",
+            )
+        except Exception as exc:
+            raise SoundboardError("Không đọc được kho.") from exc
+        prefix = f"{self._prefix}/" if self._prefix else ""
+        entries: list[tuple[str, object]] = []
+        for item in response.get("Contents", []):
+            raw_key = str(item.get("Key", ""))
+            if prefix and raw_key.startswith(prefix):
+                raw_key = raw_key[len(prefix) :]
+            modified = item.get("LastModified")
+            if raw_key and modified is not None:
+                entries.append((raw_key, modified))
+        return entries
 
     def delete_key(self, key: str) -> None:
         try:

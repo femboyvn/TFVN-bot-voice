@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import logging
 import shlex
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -38,6 +39,26 @@ from ..music_ui import (
     parse_name_announce,
     parse_panel_bump_interval,
 )
+from ..recording import (
+    FinishedTake,
+    RecordingBusy,
+    RecordingError,
+    RecordingService,
+    SyncResult,
+    TakeTap,
+    completion_message,
+)
+from ..recording_recv import (
+    build_recording_sink,
+    dave_session_of,
+    start_receive,
+    stop_receive,
+)
+from ..recording_ui import (
+    RecordingPanelManager,
+    RecordingPanelState,
+    due_for_refresh,
+)
 from ..player import (
     ControlResult,
     GuildAudioSettings,
@@ -56,6 +77,7 @@ from ..playlists import (
 from ..session import SessionManager, voice_event_announcement
 from ..soundboard import (
     InstantHit,
+    S3ObjectStore,
     SoundboardEntry,
     SoundboardError,
     SoundboardService,
@@ -63,7 +85,7 @@ from ..soundboard import (
 )
 from ..soundboard_ui import SoundboardView
 from ..spotify import is_spotify_input
-from ..tts import play_tts_on_voice_client
+from ..tts import play_tts_on_voice_client, TextToSpeech
 from ..voice import (
     VoiceAccessError,
     VoiceConnectionFailed,
@@ -129,12 +151,51 @@ class MusicCog(commands.Cog, name="Music"):
             self,
             command_prefix=settings.command_prefix,
         )
+        remote = None
+        if getattr(settings, "r2_configured", False) is True:
+            remote = S3ObjectStore.from_settings(
+                settings,
+                prefix=str(getattr(settings, "recording_r2_prefix", "recordings")),
+            )
+        self.recordings = RecordingService(settings, remote=remote)
+        self.recording_ui = RecordingPanelManager(self)
+        self._recovered_takes: tuple[FinishedTake, ...] = ()
+        self._recording_watches: dict[int, asyncio.Task[None]] = {}
+        self._recording_announcements: set[asyncio.Task[None]] = set()
         self._operation_locks: dict[int, asyncio.Lock] = {}
         self._join_announce_tasks: set[asyncio.Task[None]] = set()
         self._restored = False
         self._restoring = False
         self.players.add_state_listener(self.music_ui.on_player_state_change)
         self.players.add_state_listener(self._persist_playback_state)
+
+    async def cog_load(self) -> None:
+        self._recovered_takes = tuple(
+            await asyncio.to_thread(self.recordings.recover_local)
+        )
+        await asyncio.to_thread(self.recordings.purge_local)
+        await asyncio.to_thread(self.recordings.purge_remote)
+
+    @commands.hybrid_command(name="record")
+    @commands.guild_only()
+    async def record(self, ctx: commands.Context[Any]) -> None:
+        """Join the caller's room and open the shared recording panel."""
+        async with self._operation_lock(ctx.guild.id):
+            if not await self._preflight_voice_connection(ctx):
+                return
+            voice_client = await self._connect_for_context(ctx)
+            if voice_client is None:
+                return
+            channel = voice_client.channel
+            if channel is None:
+                await ctx.send("Đã kết nối nhưng không gắn được kênh thoại.")
+                return
+            await self.recording_ui.post_panel(
+                ctx.channel,
+                ctx.guild.id,
+                channel.id,
+                voice_channel_name=str(getattr(channel, "name", "") or "kênh thoại"),
+            )
 
     @commands.hybrid_command()
     @commands.guild_only()
@@ -655,6 +716,7 @@ class MusicCog(commands.Cog, name="Music"):
             return
         self._restored = True
         await self._restore_playback_sessions()
+        await self._publish_recovered_recordings()
 
     async def _persist_playback_state(
         self, guild_id: int, snapshot: PlayerSnapshot,
@@ -784,6 +846,13 @@ class MusicCog(commands.Cog, name="Music"):
             return
         async with self._operation_lock(guild.id):
             if after_id is not None:
+                take = self.recordings.active(guild.id)
+                if (
+                    take is not None
+                    and isinstance(before_id, int)
+                    and take.voice_channel_id == before_id
+                ):
+                    await self._finish_take(guild.id)
                 session = self.sessions.get(guild.id)
                 if (
                     session is not None
@@ -1051,6 +1120,7 @@ class MusicCog(commands.Cog, name="Music"):
 
     async def _stop_after_failed_rejoin(self, guild: discord.Guild) -> None:
         """Retire music and chat reading after a rejoin attempt has given up."""
+        await self._finish_take(guild.id)
         await self.players.remove(guild.id, disconnect=False)
         await self.sessions.stop(guild.id)
         with contextlib.suppress(PlaylistError):
@@ -1950,7 +2020,302 @@ class MusicCog(commands.Cog, name="Music"):
         else:
             await interaction.response.send_message(message, ephemeral=True)
 
+    def ui_recording_state(self, guild_id: int) -> RecordingPanelState:
+        take = self.recordings.active(guild_id)
+        if take is None:
+            return RecordingPanelState(False, 0.0, 0, "")
+        return RecordingPanelState(
+            True,
+            take.elapsed(),
+            take.speaker_count,
+            take.voice_channel_name,
+        )
+
+    async def ui_start_recording(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        """Start a take. An empty string means the panel itself is the reply."""
+        async with self._operation_lock(guild_id):
+            return await self._start_recording(
+                interaction,
+                guild_id,
+                voice_channel_id,
+            )
+
+    async def _start_recording(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        if self.recordings.active(guild_id) is not None:
+            return "Kênh này đang được ghi."
+        guild = interaction.guild
+        if guild is None or guild.id != guild_id:
+            return "Bảng điều khiển này không còn hợp lệ."
+        voice_client = guild.voice_client
+        if not voice_client_is_live(guild, voice_client):
+            return "Bot chưa kết nối kênh thoại."
+        channel = getattr(voice_client, "channel", None)
+        if getattr(channel, "id", None) != voice_channel_id:
+            return "Bot đang ở kênh thoại khác. Hãy vào cùng kênh để điều khiển."
+        channel_name = str(getattr(channel, "name", "") or "kênh thoại")
+        text_channel_id = getattr(interaction.channel, "id", None)
+        starter_id = getattr(interaction.user, "id", None)
+        try:
+            take = self.recordings.start(
+                guild_id=guild_id,
+                voice_channel_id=voice_channel_id,
+                text_channel_id=text_channel_id if isinstance(text_channel_id, int) else None,
+                starter_id=starter_id if isinstance(starter_id, int) else None,
+                voice_channel_name=channel_name,
+            )
+        except RecordingBusy:
+            return "Kênh này đang được ghi."
+        try:
+            sink = build_recording_sink(take, lambda: dave_session_of(voice_client))
+            start_receive(voice_client, sink)
+        except RecordingError as exc:
+            self.recordings.abort(guild_id)
+            return str(exc)
+        except Exception:
+            log.exception("Could not listen in guild %s", guild_id)
+            self.recordings.abort(guild_id)
+            return "Không nhận được tiếng từ kênh thoại."
+        player = self.players.get(guild_id)
+        if player is not None and hasattr(player, "set_frame_tap"):
+            player.set_frame_tap(TakeTap(take))
+        self._schedule_recording_watch(guild_id)
+        if getattr(self.settings, "tts_enabled", False) is True:
+            self._schedule_recording_announcement(guild)
+        return ""
+
+    async def ui_stop_recording(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        voice_channel_id: int,
+    ) -> str:
+        async with self._operation_lock(guild_id):
+            take = self.recordings.active(guild_id)
+            if take is None:
+                return "Chưa có bản ghi nào đang chạy."
+            if take.voice_channel_id != voice_channel_id:
+                return "Bảng điều khiển này không còn gắn với bản ghi."
+            await self._finish_take(guild_id)
+        return ""
+
+    def _schedule_recording_watch(self, guild_id: int) -> None:
+        existing = self._recording_watches.get(guild_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._watch_recording(guild_id),
+            name=f"record-watch-{guild_id}",
+        )
+        self._recording_watches[guild_id] = task
+
+    def _schedule_recording_announcement(self, guild: discord.Guild) -> None:
+        task = asyncio.create_task(
+            self._announce_recording(guild),
+            name=f"record-announce-{guild.id}",
+        )
+        self._recording_announcements.add(task)
+        task.add_done_callback(self._recording_announcements.discard)
+
+    async def _announce_recording(self, guild: discord.Guild) -> None:
+        text = "Bắt đầu ghi âm"
+        player = self.players.get(guild.id)
+        if player is not None:
+            try:
+                if await player.speak_over_music(text):
+                    return
+            except Exception:
+                log.exception("Could not speak the recording announcement over music")
+        voice_client = guild.voice_client
+        tts = getattr(self.bot, "tts", None)
+        if (
+            voice_client is None
+            or not isinstance(tts, TextToSpeech)
+            or not voice_client_is_live(guild, voice_client)
+        ):
+            return
+        volume = 0.7
+        raw_volume = getattr(self.settings, "default_volume", 0.7)
+        if isinstance(raw_volume, (int, float)) and not isinstance(raw_volume, bool):
+            volume = float(raw_volume)
+        if player is not None:
+            player_volume = getattr(player, "tts_volume", volume)
+            if isinstance(player_volume, (int, float)) and not isinstance(player_volume, bool):
+                volume = float(player_volume)
+        await play_tts_on_voice_client(
+            self.bot,
+            voice_client,
+            tts,
+            text,
+            volume=volume,
+            skip_if_busy=True,
+            frame_tap=getattr(player, "frame_tap", None),
+        )
+
+    async def _watch_recording(self, guild_id: int) -> None:
+        last_edit = time.monotonic()
+        last_speakers = -1
+        try:
+            while True:
+                await asyncio.sleep(1)
+                take = self.recordings.active(guild_id)
+                if take is None:
+                    return
+                if take.limit_hit.is_set() or take.elapsed() >= self.recordings.max_seconds:
+                    async with self._operation_lock(guild_id):
+                        await self._finish_take(guild_id)
+                    return
+                speakers = take.speaker_count
+                now = time.monotonic()
+                if due_for_refresh(
+                    last_edit=last_edit,
+                    last_speakers=last_speakers,
+                    now=now,
+                    speakers=speakers,
+                ):
+                    last_edit = now
+                    last_speakers = speakers
+                    await self.recording_ui.refresh(guild_id)
+        except asyncio.CancelledError:
+            return
+
+    async def _finish_take(self, guild_id: int) -> None:
+        """Finalize the open take, reset the panel, and post the zip or R2 line."""
+        if self.recordings.active(guild_id) is None:
+            await self.recording_ui.refresh(guild_id)
+            return
+        guild = self.bot.get_guild(guild_id) if hasattr(self.bot, "get_guild") else None
+        voice_client = getattr(guild, "voice_client", None) if guild is not None else None
+        if voice_client is not None:
+            stop_receive(voice_client)
+        player = self.players.get(guild_id)
+        if player is not None and hasattr(player, "set_frame_tap"):
+            player.set_frame_tap(None)
+        current = asyncio.current_task()
+        watch = self._recording_watches.get(guild_id)
+        if watch is not None and watch is not current:
+            watch.cancel()
+        self._recording_watches.pop(guild_id, None)
+        try:
+            finished = await asyncio.to_thread(self.recordings.stop, guild_id)
+        except Exception:
+            log.exception("Could not finalize recording in guild %s", guild_id)
+            await self.recording_ui.refresh(guild_id)
+            return
+        await self.recording_ui.refresh(guild_id)
+        if finished is None:
+            return
+        try:
+            synced = await asyncio.to_thread(self.recordings.sync, finished)
+        except Exception:
+            log.exception("Could not sync recording in guild %s", guild_id)
+            synced = SyncResult(synced=False, error=True, url=None)
+        await self._send_take_result(guild, guild_id, finished, synced)
+
+    async def _publish_recovered_recordings(self) -> None:
+        """Post takes that were assembled from chunks after a crash."""
+        pending = self._recovered_takes
+        self._recovered_takes = ()
+        for finished in pending:
+            guild = self.bot.get_guild(finished.guild_id)
+            try:
+                synced = await asyncio.to_thread(self.recordings.sync, finished)
+            except Exception:
+                log.exception(
+                    "Could not sync recovered recording %s",
+                    finished.session_id,
+                )
+                synced = SyncResult(synced=False, error=True, url=None)
+            await self._send_take_result(
+                guild,
+                finished.guild_id,
+                finished,
+                synced,
+            )
+
+    async def _send_take_result(
+        self,
+        guild: discord.Guild | None,
+        guild_id: int,
+        finished: object,
+        synced: object,
+    ) -> None:
+        if not isinstance(finished, FinishedTake) or not isinstance(synced, SyncResult):
+            return
+        destination = self.recording_ui.destination(guild_id)
+        if destination is None and isinstance(finished.text_channel_id, int):
+            destination = await self._recording_channel(finished.text_channel_id)
+        if destination is None:
+            return
+        limit = 25 * 1024 * 1024
+        raw_limit = getattr(guild, "filesize_limit", None) if guild is not None else None
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0:
+            limit = raw_limit
+        try:
+            size = finished.zip_path.stat().st_size
+        except OSError:
+            size = limit + 1
+        attached = size <= limit
+        too_large = not attached
+        text = completion_message(
+            finished.tracks,
+            finished.duration_seconds,
+            r2_synced=synced.synced,
+            r2_error=synced.error,
+            presigned_url=synced.url if too_large else None,
+            attached=attached,
+            too_large=too_large,
+            recovered=finished.recovered,
+            closed_chunks=finished.closed_chunks,
+        )
+        file = discord.File(finished.zip_path, filename="take.zip") if attached else None
+        try:
+            if file is None:
+                await destination.send(text)
+            else:
+                await destination.send(text, file=file)
+        except (discord.HTTPException, OSError):
+            log.exception("Could not post the recording result in guild %s", guild_id)
+            return
+        if finished.recovered:
+            await asyncio.to_thread(self.recordings.mark_reported, finished)
+
+    async def _recording_channel(
+        self,
+        channel_id: int,
+    ) -> discord.abc.Messageable | None:
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except (discord.HTTPException, OSError):
+                return None
+        if isinstance(channel, discord.abc.Messageable):
+            return channel
+        return None
+
     async def close(self) -> None:
+        for guild_id in self.recordings.active_ids():
+            async with self._operation_lock(guild_id):
+                with contextlib.suppress(Exception):
+                    await self._finish_take(guild_id)
+        for task in list(self._recording_announcements):
+            task.cancel()
+        if self._recording_announcements:
+            await asyncio.gather(
+                *self._recording_announcements,
+                return_exceptions=True,
+            )
+        await self.recording_ui.close()
         self.players.remove_state_listener(self.music_ui.on_player_state_change)
         self.players.remove_state_listener(self._persist_playback_state)
         announce_tasks = tuple(self._join_announce_tasks)
@@ -2157,6 +2522,7 @@ class MusicCog(commands.Cog, name="Music"):
         force: bool = False,
     ) -> tuple[bool, bool, bool]:
         """Stop music and chat reading, then leave the captured voice client."""
+        await self._finish_take(guild.id)
         voice_client = guild.voice_client
         had_player = await self.players.remove(guild.id, disconnect=False)
         had_session = await self.sessions.stop(guild.id)

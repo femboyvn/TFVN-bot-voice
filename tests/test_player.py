@@ -1067,6 +1067,7 @@ class GuildPlayerAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         self.player.volume = 0.7
         self.player.tts = TextToSpeech(synthesizer=_write_fake_mp3)
         self.player.tts_enabled = True
+        self.player.frame_tap = None
         self.player._announce_channel = AsyncMock()
         self.player._send = AsyncMock()  # type: ignore[method-assign]
 
@@ -1549,6 +1550,7 @@ class GuildPlayerOverlayTests(unittest.IsolatedAsyncioTestCase):
         player.guild = Mock()
         player.guild.id = 2
         player.volume = 0.7
+        player.frame_tap = None
         player._closed = False
         player._mixer = None
         player._music_active = False

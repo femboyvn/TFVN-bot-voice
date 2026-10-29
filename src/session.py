@@ -499,6 +499,7 @@ class VoiceSession:
             text,
             volume=self.volume,
             skip_if_busy=True,
+            frame_tap=getattr(player, "frame_tap", None),
         )
 
 

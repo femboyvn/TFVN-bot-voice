@@ -161,6 +161,7 @@ async def play_tts_on_voice_client(
     volume: float,
     timeout: float | None = None,
     skip_if_busy: bool = True,
+    frame_tap: object | None = None,
 ) -> bool:
     """Synthesize *text* and play it on *voice_client*.
 
@@ -202,6 +203,10 @@ async def play_tts_on_voice_client(
         if skip_if_busy and (voice_client.is_playing() or voice_client.is_paused()):
             log.warning("Voice client became busy; skipping TTS")
             return False
+        if frame_tap is not None and hasattr(frame_tap, "on_bot_frame"):
+            from .recording import TappedAudioSource
+
+            source = TappedAudioSource(source, frame_tap, "tts")
         voice_client.play(source, after=after)
         try:
             await asyncio.wait_for(finished.wait(), timeout=play_timeout)

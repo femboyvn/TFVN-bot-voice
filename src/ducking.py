@@ -7,13 +7,29 @@ attenuated (ducked).
 
 from __future__ import annotations
 
+import logging
 import threading
+from typing import Protocol
 
 import discord
+
+log = logging.getLogger(__name__)
 
 # discord.py PCM: 48 kHz, 16-bit stereo, 20 ms → 3840 bytes per frame.
 PCM_FRAME_SIZE = 3840
 DEFAULT_DUCK_LEVEL = 0.2
+
+
+class FrameTap(Protocol):
+    """Copy music and overlay stems before they are mixed for playback."""
+
+    def on_bot_frame(
+        self,
+        *,
+        music: bytes | None,
+        overlay: bytes | None,
+        overlay_kind: str | None,
+    ) -> None: ...
 
 
 def _as_discord_frame(data: bytes) -> bytes:
@@ -78,14 +94,22 @@ class DuckingAudioSource(discord.AudioSource):
         primary: discord.AudioSource,
         *,
         duck_level: float = DEFAULT_DUCK_LEVEL,
+        tap: FrameTap | None = None,
     ) -> None:
         self.primary = primary
         self.duck_level = duck_level
         self._lock = threading.Lock()
         self._secondary: discord.AudioSource | None = None
+        self._secondary_kind: str | None = None
         self._secondary_done: threading.Event | None = None
         self._primary_ended = False
         self._primary_paused = False
+        self._tap = tap
+
+    def set_tap(self, tap: FrameTap | None) -> None:
+        """Attach or clear a stem tap. Playback bytes do not change."""
+        with self._lock:
+            self._tap = tap
 
     @property
     def is_ducking(self) -> bool:
@@ -129,16 +153,23 @@ class DuckingAudioSource(discord.AudioSource):
             self.primary.volume = volume
             return True
 
-    def inject_secondary(self, source: discord.AudioSource) -> threading.Event:
+    def inject_secondary(
+        self,
+        source: discord.AudioSource,
+        *,
+        kind: str = "tts",
+    ) -> threading.Event:
         """Start mixing *source* over the primary; music is ducked until it ends.
 
-        Returns a threading.Event set when the secondary clip finishes (or is replaced).
+        *kind* is ``tts`` or ``soundboard`` and is copied to the recorder before
+        the mix. Returns a threading.Event set when the clip finishes or is replaced.
         """
         done = threading.Event()
         with self._lock:
             previous = self._secondary
             previous_done = self._secondary_done
             self._secondary = source
+            self._secondary_kind = kind
             self._secondary_done = done
         if previous is not None:
             with _suppress_cleanup():
@@ -152,6 +183,7 @@ class DuckingAudioSource(discord.AudioSource):
             previous = self._secondary
             previous_done = self._secondary_done
             self._secondary = None
+            self._secondary_kind = None
             self._secondary_done = None
         if previous is not None:
             with _suppress_cleanup():
@@ -162,9 +194,11 @@ class DuckingAudioSource(discord.AudioSource):
     def read(self) -> bytes:
         with self._lock:
             secondary = self._secondary
+            secondary_kind = self._secondary_kind
             duck = self.duck_level if secondary is not None else 1.0
             done_event = self._secondary_done
             primary_paused = self._primary_paused
+            tap = self._tap
 
         primary_data = b""
         if not self._primary_ended and not primary_paused:
@@ -185,27 +219,71 @@ class DuckingAudioSource(discord.AudioSource):
                 with self._lock:
                     if self._secondary is secondary:
                         self._secondary = None
+                        self._secondary_kind = None
                         self._secondary_done = None
                 with _suppress_cleanup():
                     secondary.cleanup()
                 if done_event is not None:
                     done_event.set()
                 secondary = None
+                secondary_kind = None
 
         if primary_paused and not self._primary_ended and not secondary_data:
             # Returning b"" ends discord.py playback. Emit one silent frame so
             # secondary audio can still be injected while music stays frozen.
-            return b"\x00" * PCM_FRAME_SIZE
+            silent = b"\x00" * PCM_FRAME_SIZE
+            self._notify_tap(tap, music=silent, overlay=b"", overlay_kind=None)
+            return silent
         if not primary_data and not secondary_data:
             return b""
         if secondary is None or not secondary_data:
-            return _as_discord_frame(primary_data)
+            frame = _as_discord_frame(primary_data)
+            self._notify_tap(tap, music=primary_data, overlay=b"", overlay_kind=None)
+            return frame
         if not primary_data:
-            # Music ended mid-TTS: finish speaking alone.
-            return _as_discord_frame(secondary_data)
+            # Music ended mid-TTS: finish speaking alone. A paused primary is
+            # silence on the music stem so the take stays aligned.
+            frame = _as_discord_frame(secondary_data)
+            paused_music = (
+                b"\x00" * PCM_FRAME_SIZE
+                if primary_paused and not self._primary_ended
+                else None
+            )
+            self._notify_tap(
+                tap,
+                music=paused_music,
+                overlay=secondary_data,
+                overlay_kind=secondary_kind,
+            )
+            return frame
+        self._notify_tap(
+            tap,
+            music=primary_data,
+            overlay=secondary_data,
+            overlay_kind=secondary_kind,
+        )
         return _as_discord_frame(
             mix_pcm16_frames(primary_data, secondary_data, duck_level=duck)
         )
+
+    def _notify_tap(
+        self,
+        tap: FrameTap | None,
+        *,
+        music: bytes | None,
+        overlay: bytes | None,
+        overlay_kind: str | None,
+    ) -> None:
+        if tap is None:
+            return
+        try:
+            tap.on_bot_frame(
+                music=music,
+                overlay=overlay,
+                overlay_kind=overlay_kind,
+            )
+        except Exception:
+            log.exception("Playback stem tap failed")
 
     def is_opus(self) -> bool:
         return False

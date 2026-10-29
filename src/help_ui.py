@@ -31,6 +31,10 @@ COMMAND_HELP: dict[str, tuple[str, str]] = {
         "",
         "Vào kênh thoại, gửi bảng nhạc, và mở bảng âm thanh tùy chỉnh.",
     ),
+    "record": (
+        "",
+        "Mở bảng ghi âm. Bấm Bắt đầu để ghi mỗi người một track, cùng nhạc, TTS và soundboard.",
+    ),
     "playlist": (
         "[server] [list | show | create | add | save | play | rename | remove | move | delete]",
         "Tạo, sửa, lưu hàng đợi và phát danh sách cá nhân hoặc chung của máy chủ.",
@@ -272,7 +276,7 @@ def _build_commands(prefix: str) -> discord.Embed:
         name="Thoại và TTS",
         value=_command_lines(
             prefix,
-            ("join", "leave", "forceleave", "nameannounce", "soundboard"),
+            ("join", "leave", "forceleave", "nameannounce", "soundboard", "record"),
         ),
         inline=False,
     )

@@ -48,7 +48,10 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
                 command.name for command in bot.commands
                 if isinstance(command, commands.HybridCommand)
             }
-            self.assertEqual(hybrid_names, {"music", "soundboard", "playlist"})
+            self.assertEqual(
+                hybrid_names,
+                {"music", "soundboard", "playlist", "record"},
+            )
 
         finally:
             await bot.close()
@@ -61,7 +64,7 @@ class BotConstructionTests(unittest.IsolatedAsyncioTestCase):
         })
         with patch("src.bot.S3ObjectStore.from_settings", return_value=DictObjectStore()):
             bot = create_bot(settings)
-        await bot.setup_hook()
+            await bot.setup_hook()
         runner = bot.playlist_backups
         self.assertIsNotNone(runner)
         assert runner is not None

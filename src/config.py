@@ -18,6 +18,17 @@ DEFAULT_SOUNDBOARD_MAX_BYTES = 1_500_000
 DEFAULT_SOUNDBOARD_CACHE_DAYS = 7
 DEFAULT_R2_PREFIX = "soundboard"
 DEFAULT_PLAYLIST_DB_PATH = "data/playlists/playlists.db"
+DEFAULT_RECORDING_DATA_DIR = "data/recordings"
+DEFAULT_RECORDING_MAX_MINUTES = 120
+DEFAULT_RECORDING_RETENTION_DAYS = 7
+DEFAULT_RECORDING_MAX_BYTES = 2_147_483_648
+DEFAULT_RECORDING_R2_PREFIX = "recordings"
+MIN_RECORDING_MINUTES = 1
+MAX_RECORDING_MINUTES = 240
+MIN_RECORDING_RETENTION_DAYS = 1
+MAX_RECORDING_RETENTION_DAYS = 90
+MIN_RECORDING_BYTES = 64 * 1024 * 1024
+MAX_RECORDING_BYTES = 20 * 1024 * 1024 * 1024
 MIN_SOUNDBOARD_SECONDS = 1
 MAX_SOUNDBOARD_SECONDS = 30
 MIN_SOUNDBOARD_SOUNDS = 1
@@ -93,6 +104,11 @@ class Settings:
     playlist_max_tracks: int = 100
     playlist_max_server: int = 20
     playlist_backup_minutes: int = 0
+    recording_data_dir: str = DEFAULT_RECORDING_DATA_DIR
+    recording_max_minutes: int = DEFAULT_RECORDING_MAX_MINUTES
+    recording_retention_days: int = DEFAULT_RECORDING_RETENTION_DAYS
+    recording_max_bytes: int = DEFAULT_RECORDING_MAX_BYTES
+    recording_r2_prefix: str = DEFAULT_RECORDING_R2_PREFIX
     r2_account_id: str = ""
     r2_endpoint: str = ""
     r2_access_key_id: str = ""
@@ -212,6 +228,33 @@ class Settings:
             playlist_max_tracks=_read_int(environment, "PLAYLIST_MAX_TRACKS", 100),
             playlist_max_server=_read_int(environment, "PLAYLIST_MAX_SERVER", 20),
             playlist_backup_minutes=_read_int(environment, "PLAYLIST_BACKUP_MINUTES", 0),
+            recording_data_dir=(
+                environment.get(
+                    "RECORDING_DATA_DIR", DEFAULT_RECORDING_DATA_DIR
+                ).strip()
+                or DEFAULT_RECORDING_DATA_DIR
+            ),
+            recording_max_minutes=_read_int(
+                environment,
+                "RECORDING_MAX_MINUTES",
+                DEFAULT_RECORDING_MAX_MINUTES,
+            ),
+            recording_retention_days=_read_int(
+                environment,
+                "RECORDING_RETENTION_DAYS",
+                DEFAULT_RECORDING_RETENTION_DAYS,
+            ),
+            recording_max_bytes=_read_int(
+                environment,
+                "RECORDING_MAX_BYTES",
+                DEFAULT_RECORDING_MAX_BYTES,
+            ),
+            recording_r2_prefix=(
+                environment.get(
+                    "RECORDING_R2_PREFIX", DEFAULT_RECORDING_R2_PREFIX
+                ).strip()
+                or DEFAULT_RECORDING_R2_PREFIX
+            ),
         )
         settings._validate()
         return settings
@@ -290,3 +333,30 @@ class Settings:
             raise ConfigurationError("PLAYLIST_BACKUP_MINUTES must be between 0 and 10080")
         if self.playlist_backup_minutes and not self.r2_configured:
             raise ConfigurationError("PLAYLIST_BACKUP_MINUTES requires R2 configuration")
+        if not self.recording_data_dir.strip():
+            raise ConfigurationError("RECORDING_DATA_DIR cannot be empty")
+        try:
+            Path(self.recording_data_dir)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError("RECORDING_DATA_DIR is not a valid path") from exc
+        if not MIN_RECORDING_MINUTES <= self.recording_max_minutes <= MAX_RECORDING_MINUTES:
+            raise ConfigurationError(
+                "RECORDING_MAX_MINUTES must be between "
+                f"{MIN_RECORDING_MINUTES} and {MAX_RECORDING_MINUTES}"
+            )
+        if not (
+            MIN_RECORDING_RETENTION_DAYS
+            <= self.recording_retention_days
+            <= MAX_RECORDING_RETENTION_DAYS
+        ):
+            raise ConfigurationError(
+                "RECORDING_RETENTION_DAYS must be between "
+                f"{MIN_RECORDING_RETENTION_DAYS} and {MAX_RECORDING_RETENTION_DAYS}"
+            )
+        if not MIN_RECORDING_BYTES <= self.recording_max_bytes <= MAX_RECORDING_BYTES:
+            raise ConfigurationError(
+                "RECORDING_MAX_BYTES must be between "
+                f"{MIN_RECORDING_BYTES} and {MAX_RECORDING_BYTES}"
+            )
+        if not self.recording_r2_prefix.strip():
+            raise ConfigurationError("RECORDING_R2_PREFIX cannot be empty")

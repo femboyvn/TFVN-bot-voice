@@ -9,11 +9,13 @@ import discord
 from src.config import Settings
 from src.voice import (
     VoiceAccessError,
+    _abandon_voice_client,
     channel_was_deleted,
     connect_member_voice_client,
     connect_voice_channel,
     disconnect_guild_voice_client,
     live_voice_channel_id,
+    receiving_voice_client_class,
     same_voice_channel_error,
     voice_client_is_live,
 )
@@ -90,9 +92,11 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIs(result, connected)
+        self.assertTrue(issubclass(receiving_voice_client_class(), discord.VoiceClient))
         self.channel.connect.assert_awaited_once_with(
             timeout=self.settings.voice_connect_timeout,
             reconnect=False,
+            cls=receiving_voice_client_class(),
         )
 
     async def test_concurrent_same_room_connects_share_one_handshake(self) -> None:
@@ -103,7 +107,7 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def connect(*, timeout: float, reconnect: bool) -> Mock:
+        async def connect(*, timeout: float, reconnect: bool, cls: object) -> Mock:
             self.guild.voice_client = connected
             started.set()
             await release.wait()
@@ -364,7 +368,7 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
 
         attempts = 0
 
-        async def hang(*, timeout: float, reconnect: bool) -> Mock:
+        async def hang(*, timeout: float, reconnect: bool, cls: object) -> Mock:
             nonlocal attempts
             attempts += 1
             self.guild.voice_client = voice_client
@@ -439,6 +443,22 @@ class VoiceRoomAccessTests(unittest.IsolatedAsyncioTestCase):
         message = str(caught.exception).lower()
         self.assertIn("2 lần thử", message)
         self.assertIn("ngắt kết nối", message)
+
+    def test_abandon_stops_receive_and_playback(self) -> None:
+        voice_client = Mock()
+        voice_client.stop_listening = Mock()
+        voice_client.stop = Mock()
+        voice_client.cleanup = Mock()
+        guild = Mock()
+        guild.id = 4
+        guild.voice_client = voice_client
+
+        _abandon_voice_client(guild, voice_client)
+
+        voice_client.stop_listening.assert_called_once_with()
+        voice_client.stop.assert_called_once_with()
+        voice_client.cleanup.assert_called_once_with()
+        self.assertIsNone(guild.voice_client)
 
 
 if __name__ == "__main__":

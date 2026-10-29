@@ -22,6 +22,11 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.soundboard_max_sounds, 40)
         self.assertEqual(settings.soundboard_max_bytes, 1_500_000)
         self.assertEqual(settings.soundboard_cache_days, 7)
+        self.assertEqual(settings.recording_data_dir, "data/recordings")
+        self.assertEqual(settings.recording_max_minutes, 120)
+        self.assertEqual(settings.recording_retention_days, 7)
+        self.assertEqual(settings.recording_max_bytes, 2_147_483_648)
+        self.assertEqual(settings.recording_r2_prefix, "recordings")
         self.assertEqual(settings.r2_bucket, "")
         self.assertFalse(settings.r2_configured)
         self.assertNotIn("secret", repr(settings))
@@ -259,6 +264,20 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 with self.assertRaisesRegex(ConfigurationError, key):
                     Settings.from_env({"DISCORD_TOKEN": "secret", key: value})
+
+    def test_rejects_out_of_range_recording_limits(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            Settings.from_env(
+                {"DISCORD_TOKEN": "secret", "RECORDING_MAX_MINUTES": "0"}
+            )
+        with self.assertRaises(ConfigurationError):
+            Settings.from_env(
+                {"DISCORD_TOKEN": "secret", "RECORDING_RETENTION_DAYS": "0"}
+            )
+        with self.assertRaises(ConfigurationError):
+            Settings.from_env(
+                {"DISCORD_TOKEN": "secret", "RECORDING_MAX_BYTES": "10"}
+            )
 
     def test_playlist_backups_require_r2_and_accept_complete_configuration(self) -> None:
         environment = {"DISCORD_TOKEN": "secret", "PLAYLIST_BACKUP_MINUTES": "60"}

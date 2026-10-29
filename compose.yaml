@@ -15,9 +15,11 @@ services:
     volumes:
       - soundboard-data:/data/soundboard
       - playlist-data:/data/playlists
+      - recording-data:/data/recordings
     environment:
       SOUNDBOARD_DATA_DIR: /data/soundboard
       PLAYLIST_DB_PATH: /data/playlists/playlists.db
+      RECORDING_DATA_DIR: /data/recordings
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 20s
@@ -25,3 +27,4 @@ services:
 volumes:
   soundboard-data:
   playlist-data:
+  recording-data:

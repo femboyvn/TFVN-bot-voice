@@ -16,7 +16,8 @@ from pathlib import Path
 
 import discord
 
-from .ducking import DEFAULT_DUCK_LEVEL, DuckingAudioSource
+from .ducking import DEFAULT_DUCK_LEVEL, DuckingAudioSource, FrameTap
+from .recording import TappedAudioSource
 from .media import MediaService, QueuedTrack, Track
 from .tts import (
     TTS_FFMPEG_OPTIONS,
@@ -159,6 +160,7 @@ class GuildPlayer:
         self._announce_channel: discord.abc.Messageable | None = None
         self._closed = False
         self._mixer: DuckingAudioSource | None = None
+        self.frame_tap: FrameTap | None = None
         self._music_active = False
         self._pending_jump: _JumpRequest | None = None
         self._skip_requested = False
@@ -656,7 +658,11 @@ class GuildPlayer:
                         volume=self.music_volume,
                         start_at=jump_request.offset,
                     )
-                mixer = DuckingAudioSource(source, duck_level=self.duck_level)
+                mixer = DuckingAudioSource(
+                    source,
+                    duck_level=self.duck_level,
+                    tap=self.frame_tap,
+                )
                 self._mixer = mixer
                 self._music_active = True
                 voice_client.play(
@@ -732,7 +738,15 @@ class GuildPlayer:
             text,
             volume=getattr(self, "tts_volume", self.volume),
             skip_if_busy=True,
+            frame_tap=self.frame_tap,
         )
+
+    def set_frame_tap(self, tap: FrameTap | None) -> None:
+        """Copy later music, TTS, and soundboard frames into *tap*."""
+        self.frame_tap = tap
+        mixer = self._mixer
+        if mixer is not None:
+            mixer.set_tap(tap)
 
     def _file_audio_source(self, path: Path) -> discord.AudioSource:
         """Build a local-file PCM source. The caller owns the file lifetime."""
@@ -772,7 +786,7 @@ class GuildPlayer:
                 source.cleanup()
                 return False
             try:
-                done = mixer.inject_secondary(source)
+                done = mixer.inject_secondary(source, kind="soundboard")
                 await asyncio.wait_for(
                     asyncio.to_thread(done.wait),
                     timeout=timeout,
@@ -796,6 +810,9 @@ class GuildPlayer:
 
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
+
+        if self.frame_tap is not None:
+            source = TappedAudioSource(source, self.frame_tap, "soundboard")
 
         finished = asyncio.Event()
 
@@ -872,7 +889,7 @@ class GuildPlayer:
                 source.cleanup()
                 return False
 
-            done = mixer.inject_secondary(source)
+            done = mixer.inject_secondary(source, kind="tts")
             await asyncio.wait_for(
                 asyncio.to_thread(done.wait),
                 timeout=play_timeout,

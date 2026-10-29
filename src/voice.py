@@ -177,7 +177,18 @@ def _voice_client_connected(voice_client: object) -> bool:
         return False
 
 
+def receiving_voice_client_class() -> type[discord.VoiceClient]:
+    """Voice client that can both play and receive per-user audio."""
+    from discord.ext import voice_recv
+
+    return voice_recv.VoiceRecvClient
+
+
 def _stop_voice_playback(voice_client: object) -> None:
+    stop_listening = getattr(voice_client, "stop_listening", None)
+    if callable(stop_listening):
+        with contextlib.suppress(Exception):
+            stop_listening()
     stop = getattr(voice_client, "stop", None)
     if callable(stop):
         with contextlib.suppress(Exception):
@@ -484,6 +495,7 @@ async def _attempt_voice_connect(
         connect(
             timeout=settings.voice_connect_timeout,
             reconnect=False,
+            cls=receiving_voice_client_class(),
         )
     )
     task.add_done_callback(_consume_future_exception)
